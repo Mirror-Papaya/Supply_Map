@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import time
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 
 import lark_oapi as lark
@@ -52,9 +53,14 @@ def _to_incoming(ev) -> bot.Incoming:
         content = json.loads(msg.content or "{}")
     except json.JSONDecodeError:
         content = {}
+    created_at = ""
+    try:      # 飞书的消息时间是毫秒时间戳：登记时间用"发出指令的时间"，而不是机器人处理的时间
+        created_at = datetime.fromtimestamp(int(msg.create_time) / 1000).strftime("%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        pass
     return bot.Incoming(message_id=msg.message_id, chat_id=msg.chat_id, chat_type=msg.chat_type,
                         msg_type=msg.message_type, content=content, sender_id=sender_id,
-                        mentioned_bot=mentioned)
+                        mentioned_bot=mentioned, created_at=created_at)
 
 
 def _process(ev):
@@ -114,7 +120,7 @@ def run_forever():
                     log.warning("获取机器人 open_id 失败（群聊中任何 @ 都会被当作 @机器人）：%s", e)
             status.set(feishu="连接中", feishu_error="")
             cli = lark.ws.Client(config.FEISHU_APP_ID, config.FEISHU_APP_SECRET, event_handler=handler,
-                                 log_level=lark.LogLevel.INFO)
+                                 domain=config.FEISHU_BASE_URL, log_level=lark.LogLevel.INFO)
             cli.start()
         except Exception as e:  # noqa: BLE001
             log.exception("飞书长连接异常，10 秒后重连")

@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from . import codes, config, db, maps, skus
 
 REGISTER, REMOVE = "登记", "移除"
+METHOD_MANUAL, METHOD_AUTO = "手动入库", "自动入库"   # 网页手动录入 / 飞书群聊里发指令给机器人
 
 
 @dataclass
@@ -46,8 +47,14 @@ def check(e: Entry) -> Result:
         return res
     loc = codes.parse(e.loc_text or "")
     if not loc:
-        res.msg = f"库位码格式不对：{e.loc_text or '（空）'}，应为 仓库号-区块-货架-层-包装，如 01-A-03-2-0"
+        res.msg = f"库位码格式不对：{e.loc_text or '（空）'}，应为 仓库号-区块-货架-层-区域/总数，如 01-A-03-02-3/5"
         return res
+    if not loc.wh:      # 省略了仓库号：只有一个仓库时自动补上
+        whs = db.query("SELECT wh_no FROM warehouse")
+        if len(whs) != 1:
+            res.msg = f"库位码里要写仓库号，如 01-{loc.zone}-{loc.shelf}-{loc.layer:02d}-{loc.region}/{loc.total or 'N'}"
+            return res
+        loc = loc._replace(wh=whs[0]["wh_no"])
     res.code = loc.code
     shelf = maps.find_shelf(loc.wh, loc.zone, loc.shelf)
     if not shelf:
@@ -61,6 +68,24 @@ def check(e: Entry) -> Result:
     if not (shelf["layer_min"] <= loc.layer <= shelf["layer_max"]):
         res.msg = f"货架 {loc.shelf_key} 的层号范围是 {shelf['layer_min']}–{shelf['layer_max']}，没有第 {loc.layer} 层"
         return res
+    n = shelf["regions"]
+    legacy = None
+    if e.action == REMOVE:
+        # 按旧规则(件位)登记的记录，区域号可能超出现在的区域数、库位码也没有"/总数"：仍然允许按位置移除
+        legacy = db.query_one("SELECT loc_code FROM current_stock WHERE UPPER(sku)=? AND wh_no=? AND zone=? "
+                              "AND shelf_no=? AND layer=? AND region=? AND loc_code NOT LIKE '%/%'",
+                              (skus.key(sku_text), loc.wh, loc.zone, loc.shelf, loc.layer, loc.region))
+    if legacy:
+        res.code = legacy["loc_code"]
+    else:
+        if loc.total is not None and loc.total != n:
+            res.msg = f"货架 {loc.shelf_key} 每层分成 {n} 个区域，不是 {loc.total} 个"
+            return res
+        if loc.region > n:
+            res.msg = f"货架 {loc.shelf_key} 每层只有 {n} 个区域，没有第 {loc.region} 区域"
+            return res
+        loc = loc._replace(total=n)
+        res.code = loc.code
     known = skus.lookup(sku_text)
     if known:
         res.sku = known["sku"]
@@ -120,12 +145,12 @@ def _apply_to_current(c, sku, loc, action, qty, at, who, method):
         q, q_at, q_by = old["qty"], old["qty_at"], old["qty_by"]
     else:
         q = q_at = q_by = None
-    c.execute("INSERT INTO current_stock(sku, loc_code, wh_no, zone, shelf_no, layer, pack, qty, qty_at, qty_by, "
+    c.execute("INSERT INTO current_stock(sku, loc_code, wh_no, zone, shelf_no, layer, region, qty, qty_at, qty_by, "
               "last_at, last_by, last_method) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) "
               "ON CONFLICT(sku, loc_code) DO UPDATE SET qty=excluded.qty, qty_at=excluded.qty_at, "
               "qty_by=excluded.qty_by, last_at=excluded.last_at, last_by=excluded.last_by, "
               "last_method=excluded.last_method",
-              (sku, loc.code, loc.wh, loc.zone, loc.shelf, loc.layer, loc.pack, q, q_at, q_by, at, who, method))
+              (sku, loc.code, loc.wh, loc.zone, loc.shelf, loc.layer, loc.region, q, q_at, q_by, at, who, method))
 
 
 def rebuild_current() -> int:
@@ -135,6 +160,8 @@ def rebuild_current() -> int:
         c.execute("DELETE FROM current_stock")
         for g in logs:
             loc = codes.parse(g["loc_code"])
+            if not loc:      # 旧格式里件位为 0 的历史记录，无法对应到新库位码，跳过
+                continue
             _apply_to_current(c, g["sku"], loc, g["action"], g["qty"], g["created_at"],
                               g["user_name"] or g["user_id"], g["method"])
     return len(logs)
@@ -147,7 +174,7 @@ def locations_of(sku_list) -> dict:
         return {}
     marks = ",".join("?" * len(sku_list))
     rows = db.query(f"SELECT * FROM current_stock WHERE sku IN ({marks}) "
-                    f"ORDER BY wh_no, zone, shelf_no, layer, pack", sku_list)
+                    f"ORDER BY wh_no, zone, shelf_no, layer, region", sku_list)
     out = {s: [] for s in sku_list}
     for r in rows:
         out[r["sku"]].append(r)
@@ -162,7 +189,7 @@ def recent_logs(limit=100, sku: str | None = None) -> list:
 
 def shelf_contents(wh, zone, shelf_no) -> list:
     return db.query("SELECT * FROM current_stock WHERE wh_no=? AND zone=? AND shelf_no=? "
-                    "ORDER BY layer, pack, sku", (wh, zone, shelf_no))
+                    "ORDER BY layer, region, sku", (wh, zone, shelf_no))
 
 
 def stats() -> dict:

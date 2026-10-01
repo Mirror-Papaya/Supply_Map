@@ -23,6 +23,7 @@ class Incoming:
     content: dict
     sender_id: str = ""
     sender_name: str = ""
+    created_at: str = ""      # 消息发送时间 "YYYY-MM-DD HH:MM:SS"（本地时间），空则用处理时间
     mentioned_bot: bool = False
     extra: dict = field(default_factory=dict)
 
@@ -108,10 +109,11 @@ def _handle_text(inc: Incoming, r: Responder, text: str):
 
 def _register(inc: Incoming, r: Responder, p):
     if not p.entries and not p.errors:
-        return r.text("格式：登记 SKU 库位码 [余量]\n例：登记 SKU-000123 01-A-03-2-0 40")
+        return r.text("格式：入库 SKU 库位码 [余量]\n例：入库 B40006 01-A-01-03-3/5 40")
     for i, e in enumerate(p.entries):
         e.source_id = f"msg:{inc.message_id}:{i}"
-    results = stock.apply(p.entries, "聊天", inc.sender_id, inc.sender_name)
+    results = stock.apply(p.entries, stock.METHOD_AUTO, inc.sender_id, inc.sender_name,
+                           created_at=inc.created_at or None)
     ok = [x for x in results if x.ok]
     bad = [x for x in results if not x.ok and not x.duplicate]
     lines = []
@@ -140,8 +142,8 @@ def _handle_images(inc: Incoming, r: Responder, keys: list):
     keys = [k for k in keys if k]
     if not keys:
         return
-    if not config.ANTHROPIC_API_KEY:
-        return r.text("还没有配置图片识别（Claude API Key），暂时只能用文字或 Excel 查询")
+    if not config.vision_enabled():
+        return r.text("还没有配置图片识别（DeepSeek / Claude API Key），暂时只能用文字或 Excel 查询")
     r.text(f"收到 {len(keys)} 张图片，正在识别拣货单，大约需要 10–40 秒…")
     try:
         data = [r.download(k, "image") for k in keys]
@@ -155,11 +157,34 @@ def _handle_images(inc: Incoming, r: Responder, keys: list):
     _query(r, demands, "图片识别")
 
 
+def _handle_pdf(inc: Incoming, r: Responder, name: str):
+    if not config.vision_enabled():
+        return r.text("还没有配置图片识别（DeepSeek / Claude API Key），暂时不能识别 PDF 拣货单")
+    r.text("收到 PDF，正在识别拣货单（每页约 5 秒）…")
+    try:
+        data = r.download(inc.content.get("file_key"), "file")
+        out = vision.extract_pdf(data)
+    except vision.VisionError as e:
+        return r.text(f"识别失败：{e}")
+    except Exception as e:  # noqa: BLE001
+        log.exception("读取 PDF 失败")
+        return r.text(f"读取文件失败：{e}")
+    if not out["rows"]:
+        return r.text("这个 PDF 里没有识别到拣货商品。")
+    if out.get("truncated"):
+        r.text(f"这个 PDF 共 {out['pages']} 页，只识别了前 {vision.PDF_MAX_PAGES} 页，其余请分开发送。")
+    demands = [{"sku": row.get("sku", ""), "qty": row.get("qty"), "name": row.get("name", ""),
+                "alt": row.get("alt") or []} for row in out["rows"]]
+    _query(r, demands, "PDF识别")
+
+
 def _handle_file(inc: Incoming, r: Responder):
     name = inc.content.get("file_name", "")
+    if re.search(r"\.pdf$", name, re.I):
+        return _handle_pdf(inc, r, name)
     if not re.search(r"\.(xlsx|xls|csv)$", name, re.I):
         if inc.chat_type == "p2p":
-            r.text("只支持 Excel（.xlsx / .xls）或 CSV 格式的拣货单")
+            r.text("只支持 Excel（.xlsx / .xls）、CSV 或 PDF 格式的拣货单")
         return
     try:
         data = r.download(inc.content.get("file_key"), "file")

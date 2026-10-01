@@ -57,9 +57,9 @@ def run(demands: list) -> dict:
             flags.append("识别纠错")
         it["flags"] = flags
 
-    # 拣货顺序：按 仓库→区块→货架→层→包装 排，同一货架共用一个序号
+    # 拣货顺序：按 仓库→区块→货架→层→区域 排，同一货架共用一个序号
     lines = sorted(((r, merged[sku]) for sku in merged for r in locs[sku]),
-                   key=lambda x: (x[0]["wh_no"], x[0]["zone"], x[0]["shelf_no"], x[0]["layer"], x[0]["pack"],
+                   key=lambda x: (x[0]["wh_no"], x[0]["zone"], x[0]["shelf_no"], x[0]["layer"], x[0]["region"],
                                   x[0]["sku"]))
     seq_of_shelf = {}
     out_lines = []

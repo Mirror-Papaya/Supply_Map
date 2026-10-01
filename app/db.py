@@ -25,12 +25,9 @@ CREATE TABLE IF NOT EXISTS shelf (
     shelf_no  TEXT NOT NULL,
     layer_min INTEGER NOT NULL,
     layer_max INTEGER NOT NULL,
+    regions   INTEGER NOT NULL DEFAULT 1,
     block_id  INTEGER,
     PRIMARY KEY (wh_no, zone, shelf_no)
-);
-CREATE TABLE IF NOT EXISTS pack_code (
-    code    TEXT PRIMARY KEY,
-    meaning TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS sku (
     sku        TEXT PRIMARY KEY,
@@ -60,7 +57,7 @@ CREATE TABLE IF NOT EXISTS current_stock (
     zone        TEXT NOT NULL,
     shelf_no    TEXT NOT NULL,
     layer       INTEGER NOT NULL,
-    pack        TEXT NOT NULL,
+    region      INTEGER NOT NULL,
     qty         INTEGER,
     qty_at      TEXT,
     qty_by      TEXT,
@@ -89,6 +86,18 @@ def now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _migrate(conn):
+    """旧库升级：shelf 补 regions 列；current_stock 旧版用 pack/slot 列，它只是日志推导出的缓存，丢弃后启动时按日志重算。"""
+    shelf_cols = [r["name"] for r in conn.execute("PRAGMA table_info(shelf)")]
+    if shelf_cols and "regions" not in shelf_cols:
+        conn.execute("ALTER TABLE shelf ADD COLUMN regions INTEGER NOT NULL DEFAULT 1")
+    cols = [r["name"] for r in conn.execute("PRAGMA table_info(current_stock)")]
+    if cols and "region" not in cols:
+        conn.execute("DROP TABLE current_stock")
+        conn.execute("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute("INSERT OR REPLACE INTO kv(key, value) VALUES('needs_rebuild', '1')")
+
+
 def connect(path=None) -> sqlite3.Connection:
     """全局单连接 + 锁：本地单机工具，写入量很小，串行化最简单可靠。"""
     global _conn, _conn_path
@@ -101,6 +110,7 @@ def connect(path=None) -> sqlite3.Connection:
             _conn.row_factory = sqlite3.Row
             _conn.execute("PRAGMA journal_mode=WAL")
             _conn.execute("PRAGMA foreign_keys=ON")
+            _migrate(_conn)
             _conn.executescript(SCHEMA)
             _conn_path = path
         return _conn

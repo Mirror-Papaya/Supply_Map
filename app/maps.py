@@ -111,10 +111,15 @@ def analyze(m: dict) -> dict:
             where = f"货架 {b['zone'] or '?'}-{shelf}"
         try:
             lo, hi = int(b.get("layer_min", 1)), int(b.get("layer_max", 1))
-            if not (0 <= lo <= hi <= 9):
+            if not (0 <= lo <= hi <= 99):
                 raise ValueError
         except (TypeError, ValueError):
-            errors.append({"block": b["id"], "msg": f"{where} 层号范围无效（应为 0–9，且最低层 ≤ 最高层）"})
+            errors.append({"block": b["id"], "msg": f"{where} 层号范围无效（应为 0–99，且最低层 ≤ 最高层）"})
+        try:
+            if not (1 <= int(b.get("regions", 1)) <= 99):
+                raise ValueError
+        except (TypeError, ValueError):
+            errors.append({"block": b["id"], "msg": f"{where} 每层区域数无效（应为 1–99）"})
         if b["zone"] and re.fullmatch(r"\d{2}", shelf):
             key = (b["zone"], shelf)
             if key in seen:
@@ -146,13 +151,22 @@ def _stock_conflicts(wh_no: str, shelves: dict) -> list:
         elif not (s["layer_min"] <= r["layer"] <= s["layer_max"]):
             errors.append({"block": s["id"],
                            "msg": f"货架 {where} 第 {r['layer']} 层还有 {r['n']} 条库存登记，层号范围必须包含该层"})
+    # 区域数写在库位码里（3/5），货架上已有登记时不能改
+    old = {(r["zone"], r["shelf_no"]): r["regions"]
+           for r in db.query("SELECT zone, shelf_no, regions FROM shelf WHERE wh_no=?", (wh_no,))}
+    for key in {(r["zone"], r["shelf_no"]) for r in rows}:
+        s = shelves.get(key)
+        if s and old.get(key) not in (None, s["regions"]):
+            errors.append({"block": s["id"], "msg": f"货架 {wh_no}-{key[0]}-{key[1]} 上已有库存登记，"
+                                                   f"不能把每层区域数从 {old[key]} 改成 {s['regions']}（请先移除登记）"})
     return errors
 
 
 def validate(m: dict) -> dict:
     a = analyze(m)
     shelves = {(b["zone"], b["shelf"]): {"id": b["id"], "layer_min": int(b.get("layer_min", 1)),
-                                         "layer_max": int(b.get("layer_max", 1))}
+                                         "layer_max": int(b.get("layer_max", 1)),
+                                         "regions": int(b.get("regions", 1) or 1)}
                for b in a["blocks"].values() if b["type"] == "storage" and b["zone"]}
     a["errors"] += _stock_conflicts(m["wh_no"], shelves)
     return a
@@ -177,9 +191,10 @@ def save(m: dict) -> dict:
             c.execute("INSERT INTO zone(wh_no, letter, color) VALUES(?,?,?)", (wh, z, zi["color"]))
         for b in a["blocks"].values():
             if b["type"] == "storage":
-                c.execute("INSERT INTO shelf(wh_no, zone, shelf_no, layer_min, layer_max, block_id) "
-                          "VALUES(?,?,?,?,?,?)",
-                          (wh, b["zone"], b["shelf"], int(b["layer_min"]), int(b["layer_max"]), b["id"]))
+                c.execute("INSERT INTO shelf(wh_no, zone, shelf_no, layer_min, layer_max, regions, block_id) "
+                          "VALUES(?,?,?,?,?,?,?)",
+                          (wh, b["zone"], b["shelf"], int(b["layer_min"]), int(b["layer_max"]),
+                           int(b.get("regions", 1) or 1), b["id"]))
     n_shelf = sum(1 for b in a["blocks"].values() if b["type"] == "storage")
     return {"ok": True, "errors": [], "warnings": a["warnings"], "shelves": n_shelf, "zones": len(a["zones"])}
 

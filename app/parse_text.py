@@ -20,6 +20,9 @@ CMD_QUERY = {"查询", "查", "找", "拣货", "query", "q"}
 CMD_HELP = {"帮助", "help", "?", "？", "菜单", "说明"}
 
 QTY_RE = re.compile(r"^(\d{1,7})(个|件|只|把|pcs|pc|套|盒|箱)?$", re.I)
+# 入库指令里的余量可以更口语：58 / 58件 / 共58件 / 共计58个 / 余量58 / 数量58 / x58。
+# 只用在"入库/移除"指令里；查询时 X100 这样的 SKU 不能被当成数量，所以查询仍用上面的严格规则。
+QTY_LOOSE_RE = re.compile(r"^(?:共计|共|合计|余量|数量|盘点|库存|qty|x|×|\*|=)?(\d{1,7})(个|件|只|把|pcs|pc|套|盒|箱|包|条|片|支|根|块|卷|瓶|桶)?$", re.I)
 
 
 @dataclass
@@ -53,8 +56,8 @@ def _cmd_of(tok: str):
     return None, None
 
 
-def _qty(tok: str):
-    m = QTY_RE.match(tok)
+def _qty(tok: str, loose: bool = False):
+    m = (QTY_LOOSE_RE if loose else QTY_RE).match(tok)
     return int(m.group(1)) if m else None
 
 
@@ -86,7 +89,7 @@ def _parse_register(lines, action) -> Parsed:
         label = f"第{i}行" if len(lines) > 1 else ""
         idx = next((j for j, t in enumerate(toks) if codes.parse(t)), None)
         if idx is None:
-            p.errors.append((label, line.strip(), "没找到库位码（格式如 01-A-03-2-0）"))
+            p.errors.append((label, line.strip(), "没找到库位码（格式如 01-A-01-03-3/5）"))
             continue
         loc_tok = toks[idx]
         before, after = toks[:idx], toks[idx + 1:]
@@ -97,7 +100,7 @@ def _parse_register(lines, action) -> Parsed:
             continue
         qty = None
         if after:
-            qty = _qty(after[0])
+            qty = _qty(after[0], loose=True)
             if qty is None or len(after) > 1:
                 p.errors.append((label, line.strip(), f"余量应为整数：{' '.join(after)}"))
                 continue
@@ -131,13 +134,14 @@ HELP_TEXT = """📦 库存地图机器人 使用说明
 · 发 Excel / CSV 拣货单文件
 · 文字：查询 SKU1 SKU2 …（SKU 后可跟需求数量）
 
-【登记库位】（余量选填，填的是盘点数）
-登记 SKU 库位码 [余量]
-例：登记 SKU-000123 01-A-03-2-0 40
-可多行批量：第一行写"登记"，后面每行一条
+【入库 / 登记库位】（余量选填，填的是盘点数）
+入库 SKU 库位码 [余量]
+例：入库 B40006 01-A-01-03-3/5 40
+可多行批量：第一行写"入库"，后面每行一条（"登记"也行）
 
 【移除】货已不在该库位时
 移除 SKU 库位码
 
-库位码：仓库号-区块-货架-层-包装，如 01-A-03-2-0
-（也可以写成 01A0320）"""
+库位码：仓库号-区块-货架-层-区域/总数，如 01-A-01-03-3/5
+= 01 号仓 A 区 01 号货架，从下往上第 3 层，这一层分成 5 个区域里的第 3 个。
+只有一个仓库时仓库号可以省略：A-01-03-3/5"""

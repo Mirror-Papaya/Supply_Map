@@ -27,7 +27,7 @@ def client() -> lark.Client:
     with _lock:
         if _client is None:
             _client = (lark.Client.builder().app_id(config.FEISHU_APP_ID).app_secret(config.FEISHU_APP_SECRET)
-                       .log_level(lark.LogLevel.WARNING).build())
+                       .domain(config.FEISHU_BASE_URL).log_level(lark.LogLevel.WARNING).build())
         return _client
 
 
@@ -89,7 +89,8 @@ def user_name(open_id: str) -> str:
             log.warning("查询用户姓名失败 code=%s msg=%s（检查通讯录权限与权限范围）", resp.code, resp.msg)
     except Exception:  # noqa: BLE001
         log.exception("查询用户姓名失败")
-    _names[open_id] = name
+    if name:      # 查不到（权限还没开通等）不缓存，下次还会重试
+        _names[open_id] = name
     return name
 
 

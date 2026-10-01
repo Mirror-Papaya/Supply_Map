@@ -7,19 +7,31 @@ from app.stock import Entry
 # ---------- 库位码 ----------
 
 def test_code_parse_variants():
-    for text in ["01-A-03-2-1", "01A0321", "01-a-03-2-1", "０１－Ａ－０３－２－１", "01 A 03 2 1", "01_A_03_2_1"]:
-        assert codes.normalize(text) == "01-A-03-2-1", text
-    assert codes.normalize("01-A-03-0-0") == "01-A-03-0-0"      # 层允许 0
-    for bad in ["1-A-03-2-1", "01-AA-03-2-1", "01-A-3-2-1", "01-A-03-12-1", "01-A-03-2", "SKU-000123", ""]:
-        assert codes.parse(bad) is None, bad
+    for text in ["01-A-01-03-3/5", "01a01033/5", "０１－Ａ－０１－０３－３／５", "01 A 01 3 3/5", "01_A_01_3_3 / 5"]:
+        assert codes.normalize(text) == "01-A-01-03-3/5", text
+    assert codes.normalize("A-01-03-3/5") == "-A-01-03-3/5"      # 省略仓库号：wh 为空，由 stock.check 补
+    assert codes.parse("A-01-03-3/5").wh == ""
+    assert codes.normalize("01-A-01-00-1/1") == "01-A-01-00-1/1"  # 层允许 0
+    assert codes.normalize("01-A-01-12-10/12") == "01-A-01-12-10/12"
+    assert codes.normalize("01-A-01-03-3") == "01-A-01-03-3"      # 不写总数（分字段填表时）：总数按货架补全
+    for bad in ["1-A-01-03-3/5", "01-AA-01-03-3/5", "01-A-1-03-3/5", "01-A-01-03", "01-A-01-03/5",
+                "01-A-01-03-0/5", "01-A-01-03-6/5", "01-A-01-03-3/0", "01-A-01-123-3/5", "SKU-000123", ""]:
+        assert codes.parse(bad) is None, bad          # 区域从 1 开始，且不能超过总数
+
+
+def test_sku_is_not_mistaken_for_location():
+    for sku in ["B40006", "632016", "DL-DGJ705", "UK5001", "A12345"]:
+        assert codes.parse(sku) is None, sku
 
 
 def test_code_from_parts():
-    assert codes.from_parts(1, "a", 3, 2, 0).code == "01-A-03-2-0"
-    assert codes.from_parts("01", "B", "12", "0", "9").code == "01-B-12-0-9"
-    assert codes.from_parts(1.0, "A", 3.0, 2.0, 1.0).code == "01-A-03-2-1"
-    assert codes.from_parts(1, "A", 3, 12, 0) is None
-    assert codes.from_parts("", "A", 3, 1, 0) is None
+    assert codes.from_parts(1, "a", 1, 3, 3).code == "01-A-01-03-3"
+    assert codes.from_parts(1, "a", 1, 3, 3, 5).code == "01-A-01-03-3/5"
+    assert codes.from_parts("01", "B", "12", "0", "9").code == "01-B-12-00-9"
+    assert codes.from_parts(1.0, "A", 3.0, 2.0, 1.0).code == "01-A-03-02-1"
+    assert codes.from_parts(1, "A", 3, 123, 1) is None
+    assert codes.from_parts(1, "A", 3, 1, 0) is None
+    assert codes.from_parts("", "A", 3, 1, 1) is None
 
 
 # ---------- 地图 ----------
@@ -43,7 +55,7 @@ def test_map_duplicate_and_cross_zone(sample_map):
 
 
 def test_map_save_blocks_removal_with_stock(saved_map):
-    r = stock.apply([Entry("SKU1", "01-A-01-2-0", 5)], "聊天", "u1", "张三")
+    r = stock.apply([Entry("SKU1", "01-A-01-02-1/5", 5)], "聊天", "u1", "张三")
     assert r[0].ok
     m = copy.deepcopy(saved_map)
     del m["blocks"]["1"]
@@ -63,19 +75,19 @@ def test_render_png(saved_map):
 # ---------- 登记 ----------
 
 def test_register_and_latest_qty(saved_map):
-    r = stock.apply([Entry("SKU-1", "01a0120", 40)], "表单", "u1", "张三", created_at="2026-09-20 10:00:00")
-    assert r[0].ok and r[0].code == "01-A-01-2-0"
+    r = stock.apply([Entry("SKU-1", "01a010201", 40)], "表单", "u1", "张三", created_at="2026-09-20 10:00:00")
+    assert r[0].ok and r[0].code == "01-A-01-02-1/5"
     # 再次登记不填余量：保留 40（09-20 张三）
-    r = stock.apply([Entry("SKU-1", "01-A-01-2-0")], "聊天", "u2", "李四", created_at="2026-09-24 10:00:00")
+    r = stock.apply([Entry("SKU-1", "01-A-01-02-1/5")], "聊天", "u2", "李四", created_at="2026-09-24 10:00:00")
     cur = stock.locations_of(["SKU-1"])["SKU-1"]
     assert len(cur) == 1 and cur[0]["qty"] == 40 and cur[0]["qty_by"] == "张三" and cur[0]["last_by"] == "李四"
     # 新盘点数
-    stock.apply([Entry("SKU-1", "01-A-01-2-0", 35)], "聊天", "u2", "李四")
+    stock.apply([Entry("SKU-1", "01-A-01-02-1/5", 35)], "聊天", "u2", "李四")
     assert stock.locations_of(["SKU-1"])["SKU-1"][0]["qty"] == 35
     # 移除后重新登记：余量留空
-    assert stock.apply([Entry("SKU-1", "01-A-01-2-0", action="移除")], "聊天", "u2", "李四")[0].ok
+    assert stock.apply([Entry("SKU-1", "01-A-01-02-1/5", action="移除")], "聊天", "u2", "李四")[0].ok
     assert stock.locations_of(["SKU-1"])["SKU-1"] == []
-    stock.apply([Entry("SKU-1", "01-A-01-2-0")], "聊天", "u2", "李四")
+    stock.apply([Entry("SKU-1", "01-A-01-02-1/5")], "聊天", "u2", "李四")
     assert stock.locations_of(["SKU-1"])["SKU-1"][0]["qty"] is None
     # 日志完整保留，重算结果一致
     assert len(stock.recent_logs()) == 5
@@ -86,11 +98,11 @@ def test_register_and_latest_qty(saved_map):
 
 def test_register_validation(saved_map):
     cases = {
-        "01-A-09-1-0": "没有 09 号货架",
-        "01-C-01-1-0": "没有区块 C",
-        "02-A-01-1-0": "仓库 02 还没有地图",
-        "01-A-01-5-0": "层号范围",
-        "01-A-02-0-0": None,           # 货架 02 允许 0 层
+        "01-A-09-01-1/5": "没有 09 号货架",
+        "01-C-01-01-1/5": "没有区块 C",
+        "02-A-01-01-1/5": "仓库 02 还没有地图",
+        "01-A-01-05-1/5": "层号范围",
+        "01-A-02-00-1/5": None,           # 货架 02 允许 0 层
         "abc": "格式不对",
     }
     for code, expect in cases.items():
@@ -99,11 +111,11 @@ def test_register_validation(saved_map):
             assert r.ok, (code, r.msg)
         else:
             assert not r.ok and expect in r.msg, (code, r.msg)
-    assert not stock.check(Entry("S", "01-A-01-1-0", action="移除")).ok
+    assert not stock.check(Entry("S", "01-A-01-01-1/5", action="移除")).ok
 
 
 def test_duplicate_source_id(saved_map):
-    e = Entry("S", "01-A-01-1-0", 3, source_id="rec1")
+    e = Entry("S", "01-A-01-01-1/5", 3, source_id="rec1")
     assert stock.apply([e], "表单")[0].ok
     r = stock.apply([e], "表单")[0]
     assert not r.ok and r.duplicate
@@ -111,20 +123,20 @@ def test_duplicate_source_id(saved_map):
 
 def test_sku_dictionary_canonical(saved_map):
     skus.upsert([{"sku": "DL111250Z", "name": "得力卷尺5m", "aliases": "EDL111250Z"}])
-    r = stock.apply([Entry("edl111250z", "01-A-01-1-0")], "聊天")[0]
+    r = stock.apply([Entry("edl111250z", "01-A-01-01-1/5")], "聊天")[0]
     assert r.ok and r.sku == "DL111250Z" and not r.warnings
-    r = stock.apply([Entry("UNKNOWN-1", "01-A-01-1-0")], "聊天")[0]
+    r = stock.apply([Entry("UNKNOWN-1", "01-A-01-01-1/5")], "聊天")[0]
     assert r.ok and "不在商品字典" in r.warnings[0]
 
 
 # ---------- 文本解析 ----------
 
 def test_parse_register_multiline():
-    p = parse_text.parse("登记\nSKU-1 01-A-01-2-0 40\nSKU-2 01A0110\n01-B-01-1-0 SKU-3 5个\n移除 SKU-4 01-A-01-1-0\nbad line")
+    p = parse_text.parse("登记\nSKU-1 01-A-01-02-1/5 40\nSKU-2 01A010101\n01-B-01-01-1/5 SKU-3 5个\n移除 SKU-4 01-A-01-01-1/5\nbad line")
     assert p.kind == "register"
     got = [(e.sku, e.loc_text, e.qty, e.action) for e in p.entries]
-    assert got == [("SKU-1", "01-A-01-2-0", 40, "登记"), ("SKU-2", "01A0110", None, "登记"),
-                   ("SKU-3", "01-B-01-1-0", 5, "登记"), ("SKU-4", "01-A-01-1-0", None, "移除")]
+    assert got == [("SKU-1", "01-A-01-02-1/5", 40, "登记"), ("SKU-2", "01A010101", None, "登记"),
+                   ("SKU-3", "01-B-01-01-1/5", 5, "登记"), ("SKU-4", "01-A-01-01-1/5", None, "移除")]
     assert len(p.errors) == 1
 
 
@@ -151,7 +163,7 @@ def test_matcher(saved_map):
 
 def test_query_run(saved_map):
     skus.upsert([{"sku": "A1", "name": "扳手"}, {"sku": "B2", "name": "钳子"}, {"sku": "C3", "name": "锤子"}])
-    stock.apply([Entry("A1", "01-B-01-1-0", 10), Entry("A1", "01-A-02-0-0", 2), Entry("B2", "01-A-01-3-0")], "聊天")
+    stock.apply([Entry("A1", "01-B-01-01-1/5", 10), Entry("A1", "01-A-02-00-1/5", 2), Entry("B2", "01-A-01-03-1/5")], "聊天")
     res = query.run([{"sku": "A1", "qty": 15}, {"sku": "b2", "qty": 1}, {"sku": "C3", "qty": 1},
                      {"sku": "ZZZ", "qty": 1}, {"sku": "a1", "qty": 1}])
     items = {it["sku"]: it for it in res["items"]}
@@ -161,7 +173,7 @@ def test_query_run(saved_map):
     assert items["C3"]["flags"] == ["未登记"]
     assert [u["input"] for u in res["unmatched"]] == ["ZZZ"]
     order = [(ln["seq"], ln["row"]["loc_code"]) for ln in res["lines"]]
-    assert order == [(1, "01-A-01-3-0"), (2, "01-A-02-0-0"), (3, "01-B-01-1-0")]
+    assert order == [(1, "01-A-01-03-1/5"), (2, "01-A-02-00-1/5"), (3, "01-B-01-01-1/5")]
     assert res["warehouses"] == {"01": {("A", "01"): 1, ("A", "02"): 2, ("B", "01"): 3}}
 
 
@@ -179,3 +191,14 @@ def test_read_table_detects_columns():
     wb.save(buf)
     rows = skus.rows_from_table(skus.read_table("pick.xlsx", buf.getvalue()))
     assert [(r["sku"], r["name"], r["qty"]) for r in rows] == [("A1", "扳手", "2"), ("B2", "钳子", "1")]
+
+
+def test_matcher_strips_platform_variant_suffix_and_suggests_by_name(saved_map):
+    from app import matcher
+    skus.upsert([{"sku": "DL016", "name": "HOOK KNIFE 162MM YELLOW"}, {"sku": "30001", "name": "EMERGENCY PONCHO (YELLOW)"}])
+    idx = matcher.Index()
+    assert idx.match("DL016_P3")["sku"] == "DL016" and idx.match("DL016_P3")["method"] == "去后缀"
+    assert idx.match("XYZ_P3")["sku"] is None                                 # 去掉后缀后字典里没有：不乱匹配
+    m = idx.match("2061949924-1636349324008-0", 'Ander Emergency Poncho Rain Coat 50"x80" BSI Supply')
+    assert m["sku"] is None and m["candidates"] == ["30001"]                    # 只提示相近，不自动匹配
+    assert idx.match("ZZZ", "Totally different thing")["candidates"] == []

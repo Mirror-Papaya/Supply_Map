@@ -50,9 +50,9 @@ def sample_map():
     paint_rect(m, 7, 12, 8, 17, t=1, bid=4)
     paint_rect(m, 5, 0, 5, 19, t=3)
     m["blocks"] = {
-        "1": {"type": "storage", "shelf": "01", "layer_min": 1, "layer_max": 4},
-        "2": {"type": "storage", "shelf": "02", "layer_min": 0, "layer_max": 3},
-        "3": {"type": "storage", "shelf": "01", "layer_min": 1, "layer_max": 2},
+        "1": {"type": "storage", "shelf": "01", "layer_min": 1, "layer_max": 4, "regions": 5},
+        "2": {"type": "storage", "shelf": "02", "layer_min": 0, "layer_max": 3, "regions": 5},
+        "3": {"type": "storage", "shelf": "01", "layer_min": 1, "layer_max": 2, "regions": 5},
         "4": {"type": "function", "label": "打包台"},
     }
     m["next_id"] = 5

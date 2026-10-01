@@ -1,0 +1,383 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>手动入库 · 库存地图</title>
+<link rel="stylesheet" href="/static/common.css">
+<style>
+  .layout { display: grid; grid-template-columns: minmax(340px, 1fr) minmax(400px, 520px); gap: 16px; padding: 16px; align-items: start; }
+  @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .card h2 { font-size: 15px; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+  .side { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  .mapwrap { border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: #fff; }
+  #cv { display: block; width: 100%; cursor: pointer; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .row + .row { margin-top: 8px; }
+  .grow-in { flex: 1; min-width: 160px; }
+  #sku { font-family: Consolas, monospace; font-size: 16px; }
+  .skuinfo { margin-top: 6px; min-height: 18px; font-size: 13px; }
+  .ok-text { color: var(--ok); } .warn-text { color: var(--warn); } .err-text { color: var(--danger); }
+  .gridbox { overflow: auto; border: 1px solid var(--line); border-radius: 6px; max-height: 420px; }
+  table.slots { border-collapse: separate; border-spacing: 0; width: auto; }
+  table.slots th, table.slots td { padding: 0; border: 0; background: none; }
+  table.slots th { font-size: 12px; color: var(--muted); font-weight: 500; padding: 4px 6px; text-align: center; white-space: nowrap;
+    position: sticky; top: 0; background: var(--surface-2); z-index: 2; }
+  table.slots th.rowh { position: sticky; left: 0; top: auto; z-index: 1; text-align: right; background: var(--surface-2); }
+  table.slots th.corner { left: 0; z-index: 3; }
+  .cell { width: 104px; height: 58px; margin: 2px; border: 1px dashed #ced4da; border-radius: 5px; background: #fff; cursor: pointer;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; font-size: 11px; line-height: 1.2;
+    overflow: hidden; padding: 0 2px; text-align: center; }
+  .cell:hover { border-color: var(--accent); }
+  .cell.occ { background: #d0ebff; border: 1px solid #74c0fc; font-family: Consolas, monospace; }
+  .cell.picked { outline: 3px solid var(--accent); outline-offset: -1px; }
+  .cell small { color: var(--muted); font-size: 10px; }
+  .pick { margin-top: 10px; padding: 10px 12px; background: var(--surface-2); border-radius: 8px; }
+  .code { font-family: Consolas, monospace; font-size: 20px; font-weight: 700; letter-spacing: .5px; }
+  .occlist { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+  .occlist div { display: flex; gap: 8px; align-items: center; font-size: 13px; }
+  .scroll { max-height: 300px; overflow: auto; }
+  td.mono, .mono { font-family: Consolas, monospace; }
+  .legend { font-size: 12px; color: var(--muted); margin-top: 8px; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a href="/" class="brand">库存地图</a>
+  <strong>手动入库</strong>
+  <label class="field-inline">仓库 <select id="wh"></select></label>
+  <span class="grow"></span>
+  <a href="/editor">地图编辑器</a>
+</header>
+
+<div class="layout">
+  <section class="card">
+    <h2>① 点选货架 <span class="note" id="mapNote"></span></h2>
+    <div class="mapwrap"><canvas id="cv"></canvas></div>
+    <p class="legend">蓝色是货架，右上角的数字是货架上已有的商品条数。点一个货架，右边会显示它每一层的各个区域。</p>
+  </section>
+
+  <div class="side">
+    <section class="card">
+      <h2>② 要入库的 SKU</h2>
+      <div class="row">
+        <input id="sku" class="grow-in" list="skuList" placeholder="输入 SKU，如 B40006" autocomplete="off" spellcheck="false">
+        <input id="qty" type="number" min="0" step="1" style="width:110px" placeholder="余量（选填）">
+      </div>
+      <datalist id="skuList"></datalist>
+      <div class="skuinfo" id="skuInfo"></div>
+      <div class="row">
+        <label class="field-inline">登记人 <input id="who" style="width:120px" placeholder="你的名字"></label>
+        <label class="field-inline">登记时间 <input id="when" readonly style="width:170px;background:var(--surface-2)" title="提交时自动记录，不用填"></label>
+        <span class="note">时间自动读取，提交那一刻写入出入库日志</span>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2 id="shelfTitle">③ 选择位置</h2>
+      <div id="gridWrap"><p class="note">先在左边地图上点一个货架。</p></div>
+      <div class="pick" id="pickBox" hidden></div>
+    </section>
+
+    <section class="card" id="itemsCard" hidden>
+      <h2 id="itemsTitle">货架上的商品</h2>
+      <div class="scroll"><table id="items"></table></div>
+    </section>
+  </div>
+</div>
+<div id="toast" class="toast" hidden></div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const pad2 = (n) => String(n).padStart(2, "0");
+const store = {
+  get(k) { try { return localStorage.getItem(k) || ""; } catch { return ""; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch { /* 隐私模式等 */ } },
+};
+let toastTimer;
+function toast(msg, err) {
+  const t = $("#toast"); t.textContent = msg; t.className = "toast" + (err ? " err" : ""); t.hidden = false;
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => (t.hidden = true), err ? 5000 : 2500);
+}
+async function api(method, url, body) {
+  const res = await fetch(url, { method, headers: body ? { "Content-Type": "application/json" } : {}, body: body ? JSON.stringify(body) : undefined });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || `请求失败 (${res.status})`);
+  return data;
+}
+
+// ---------- 状态 ----------
+let wh = "", M = null, T, B, Z;            // 当前仓库地图
+let shelves = [], shelfByBlock = {}, blocks = {};
+let sel = null;                            // 选中的货架 {zone, shelf_no, layer_min, layer_max, block_id}
+let items = [];                            // 选中货架上的商品
+let pick = null;                           // 选中的位置 {layer, region}
+let bgImg = null, scale = 1;
+const PALETTE = ["#2f6fdb", "#d9480f", "#2b8a3e", "#ae3ec9", "#e67700", "#0c8599", "#c2255c", "#5c940d",
+  "#1864ab", "#a61e4d", "#087f5b", "#862e9c", "#d6336c", "#364fc7", "#f08c00", "#495057"];
+const zoneColor = (l) => (M.zone_meta && M.zone_meta[l] && M.zone_meta[l].color) || PALETTE[(l.charCodeAt(0) - 65) % PALETTE.length];
+
+// ---------- 仓库 / 地图 ----------
+async function loadWarehouses() {
+  const list = await api("GET", "/api/warehouses");
+  $("#wh").innerHTML = list.map((w) => `<option value="${w.wh_no}">${w.wh_no} ${esc(w.name)}</option>`).join("");
+  if (!list.length) { $("#mapNote").textContent = "还没有仓库，请先到地图编辑器新建并保存"; return; }
+  const last = store.get("inb.wh");
+  wh = list.some((w) => w.wh_no === last) ? last : list[0].wh_no;
+  $("#wh").value = wh;
+  await loadWh();
+}
+
+async function loadWh() {
+  sel = null; items = []; pick = null;
+  const [m, sh] = await Promise.all([api("GET", `/api/maps/${wh}`), api("GET", `/api/shelves/${wh}`)]);
+  M = m; shelves = sh;
+  const n = M.rows * M.cols;
+  T = new Uint8Array(n); B = new Int32Array(n); Z = new Uint8Array(n);
+  for (let r = 0; r < M.rows; r++) for (let c = 0; c < M.cols; c++) {
+    const i = r * M.cols + c;
+    T[i] = M.types[r].charCodeAt(c) - 48; B[i] = M.bids[r][c];
+    const ch = M.zones[r].charCodeAt(c); Z[i] = ch === 46 ? 0 : ch;
+  }
+  indexBlocks();
+  bgImg = null;
+  if (M.bg && M.bg.file && M.bg.show !== false) {
+    const im = new Image(); im.onload = () => { bgImg = im; draw(); };
+    im.src = `/api/maps/${wh}/bg?v=${encodeURIComponent(M.bg.file)}`;
+  }
+  $("#mapNote").textContent = shelves.length ? `${shelves.length} 个货架` : "这个仓库还没有货架，请先在地图编辑器里画货架并保存";
+  renderShelf(); fit(); draw();
+}
+
+function indexBlocks() {
+  shelfByBlock = {}; blocks = {};
+  shelves.forEach((s) => (shelfByBlock[s.block_id] = s));
+  for (let r = 0; r < M.rows; r++) for (let c = 0; c < M.cols; c++) {
+    const b = B[r * M.cols + c];
+    if (!b) continue;
+    const bi = blocks[b] || (blocks[b] = { r0: r, r1: r, c0: c, c1: c });
+    bi.r1 = Math.max(bi.r1, r); bi.c0 = Math.min(bi.c0, c); bi.c1 = Math.max(bi.c1, c);
+  }
+}
+
+const cv = $("#cv"), ctx = cv.getContext("2d");
+function fit() {
+  if (!M) return;
+  const w = cv.parentElement.clientWidth || 600;
+  scale = w / M.width;
+  const dpr = window.devicePixelRatio || 1;
+  cv.style.height = M.height * scale + "px";
+  cv.width = Math.round(w * dpr); cv.height = Math.round(M.height * scale * dpr);
+}
+
+function draw() {
+  if (!M) return;
+  const dpr = window.devicePixelRatio || 1, k = scale * dpr, cs = M.cell, { rows, cols } = M;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, cv.width, cv.height);
+  ctx.setTransform(k, 0, 0, k, 0, 0);
+  if (bgImg) { ctx.globalAlpha = (M.bg && M.bg.opacity) ?? 0.5; ctx.drawImage(bgImg, 0, 0, M.width, M.height); ctx.globalAlpha = 1; }
+  const fills = { 1: "#ffe8a3", 2: "#cfe0fb", 3: "#e9ecef" };
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+    const i = r * cols + c;
+    if (Z[i]) { ctx.globalAlpha = 0.16; ctx.fillStyle = zoneColor(String.fromCharCode(Z[i])); ctx.fillRect(c * cs, r * cs, cs, cs); ctx.globalAlpha = 1; }
+    if (fills[T[i]]) { ctx.globalAlpha = bgImg ? 0.85 : 1; ctx.fillStyle = fills[T[i]]; ctx.fillRect(c * cs, r * cs, cs, cs); ctx.globalAlpha = 1; }
+  }
+  // 区块边框
+  const edge = (id, color, lw) => {
+    ctx.strokeStyle = color; ctx.lineWidth = lw / k; ctx.beginPath();
+    for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+      const i = r * cols + c;
+      if (id ? B[i] !== id : !B[i]) continue;
+      const same = (j) => (id ? B[j] === id : B[j] === B[i]);
+      if (c + 1 >= cols || !same(i + 1)) { ctx.moveTo((c + 1) * cs, r * cs); ctx.lineTo((c + 1) * cs, (r + 1) * cs); }
+      if (c === 0 || !same(i - 1)) { ctx.moveTo(c * cs, r * cs); ctx.lineTo(c * cs, (r + 1) * cs); }
+      if (r + 1 >= rows || !same(i + cols)) { ctx.moveTo(c * cs, (r + 1) * cs); ctx.lineTo((c + 1) * cs, (r + 1) * cs); }
+      if (r === 0 || !same(i - cols)) { ctx.moveTo(c * cs, r * cs); ctx.lineTo((c + 1) * cs, r * cs); }
+    }
+    ctx.stroke();
+  };
+  edge(0, "#495057", 1.5 * dpr);
+  if (sel) edge(sel.block_id, "#1c7ed6", 3.5 * dpr);
+  // 文字：货架编号、功能区块标注、货架上的条数
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  for (const [id, bi] of Object.entries(blocks)) {
+    const meta = M.blocks[id]; if (!meta) continue;
+    const s = shelfByBlock[id];
+    const text = meta.type === "storage" ? (s ? `${s.zone}-${s.shelf_no}` : "") : (meta.label || "");
+    if (!text) continue;
+    const bw = (bi.c1 - bi.c0 + 1) * cs, bh = (bi.r1 - bi.r0 + 1) * cs;
+    const px = Math.max(9, Math.min(15, bh * scale * 0.6, (bw * scale * 0.92) / (text.length * 0.62)));
+    ctx.font = `600 ${px / scale}px "Microsoft YaHei", sans-serif`;
+    ctx.fillStyle = "#212529";
+    ctx.fillText(text, bi.c0 * cs + bw / 2, bi.r0 * cs + bh / 2);
+    if (s && s.n > 0) {
+      const rad = 7 / scale, cx = (bi.c1 + 1) * cs - rad * 0.4, cy = bi.r0 * cs + rad * 0.4;
+      ctx.fillStyle = "#1c7ed6"; ctx.beginPath(); ctx.arc(cx, cy, rad, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "#fff"; ctx.font = `700 ${9 / scale}px sans-serif`; ctx.fillText(String(s.n), cx, cy + 0.5 / scale);
+    }
+  }
+}
+
+cv.addEventListener("click", (ev) => {
+  if (!M) return;
+  const rect = cv.getBoundingClientRect();
+  const c = Math.floor(((ev.clientX - rect.left) / scale) / M.cell), r = Math.floor(((ev.clientY - rect.top) / scale) / M.cell);
+  if (r < 0 || c < 0 || r >= M.rows || c >= M.cols) return;
+  const s = shelfByBlock[B[r * M.cols + c]];
+  if (s) selectShelf(s);
+});
+window.addEventListener("resize", () => { fit(); draw(); });
+
+// ---------- 货架：每一层 × 每层的 N 个区域 ----------
+async function selectShelf(s, keepPick) {
+  sel = s; if (!keepPick) pick = null;
+  items = await api("GET", `/api/shelf/${wh}/${s.zone}/${s.shelf_no}`);
+  renderShelf(); draw();
+}
+
+function itemsAt(layer, region) { return items.filter((r) => r.layer === layer && r.region === region); }
+
+function renderShelf() {
+  if (!sel) {
+    $("#shelfTitle").textContent = "③ 选择位置";
+    $("#gridWrap").innerHTML = '<p class="note">先在左边地图上点一个货架。</p>';
+    $("#pickBox").hidden = true; $("#itemsCard").hidden = true;
+    return;
+  }
+  const n = sel.regions || 1;
+  const layers = [];
+  for (let l = sel.layer_max; l >= sel.layer_min; l--) layers.push(l);      // 上面是高层，最下面一行是最低层
+  $("#shelfTitle").innerHTML = `③ 选择位置 · 货架 <b>${sel.zone}-${sel.shelf_no}</b> <span class="note">层 ${sel.layer_min}–${sel.layer_max}，每层 ${n} 个区域，已有 ${items.length} 条</span>`;
+  let h = '<div class="gridbox"><table class="slots"><tr><th class="corner"></th>';
+  for (let r = 1; r <= n; r++) h += `<th>区域 ${r}/${n}</th>`;
+  h += "</tr>";
+  for (const l of layers) {
+    h += `<tr><th class="rowh">第${l}层</th>`;
+    for (let r = 1; r <= n; r++) {
+      const here = itemsAt(l, r);
+      const picked = pick && pick.layer === l && pick.region === r;
+      const cls = "cell" + (here.length ? " occ" : "") + (picked ? " picked" : "");
+      const tip = here.map((x) => `${x.sku} ${x.name || ""}`).join("\n") || "空";
+      const body = here.length
+        ? `${esc(here[0].sku)}${here.length > 1 ? `<br>${esc(here[1].sku)}` : ""}${here.length > 2 ? `<small>共 ${here.length} 种</small>` : ""}`
+        : "";
+      h += `<td><div class="${cls}" data-l="${l}" data-r="${r}" title="${esc(tip)}">${body}</div></td>`;
+    }
+    h += "</tr>";
+  }
+  h += '</table></div><p class="legend">层从下往上数（最下面一行是最低层）。每个格子是这一层的一个大区域，里面可以放很多种商品。点格子选位置。</p>';
+  $("#gridWrap").innerHTML = h;
+  document.querySelectorAll(".cell").forEach((el) => el.addEventListener("click", () => {
+    pick = { layer: +el.dataset.l, region: +el.dataset.r }; renderShelf(); $("#sku").focus();
+  }));
+  renderPick(); renderItems();
+}
+
+const curCode = () => `${wh}-${sel.zone}-${sel.shelf_no}-${pad2(pick.layer)}-${pick.region}/${sel.regions || 1}`;
+
+function renderPick() {
+  const box = $("#pickBox");
+  if (!sel || !pick) { box.hidden = true; return; }
+  const here = itemsAt(pick.layer, pick.region);
+  const sku = $("#sku").value.trim();
+  box.hidden = false;
+  box.innerHTML = `
+    <div class="muted">选中的位置</div>
+    <div class="code">${curCode()}</div>
+    <div class="muted">${sel.zone}-${sel.shelf_no} 货架 · 从下往上第 ${pick.layer} 层 · 这一层 ${sel.regions || 1} 个区域里的第 ${pick.region} 个</div>
+    ${here.length ? `<div class="muted" style="margin-top:8px">这个区域里已有 ${here.length} 种：</div><div class="occlist">${here.map((r) => `<div><span class="mono">${esc(r.sku)}</span><span class="muted">${esc(r.name)}</span>
+      <span>${r.qty ?? ""}</span><button type="button" class="danger" data-rm="${esc(r.sku)}">移除</button></div>`).join("")}</div>` : '<div class="note" style="margin-top:6px">这个区域是空的</div>'}
+    <div class="row" style="margin-top:10px">
+      <button type="button" class="primary" id="btnIn" ${sku ? "" : "disabled"}>${sku ? `入库 ${esc(sku)} → ${curCode()}` : "先在上面输入 SKU"}</button>
+    </div>`;
+  $("#btnIn").addEventListener("click", inbound);
+  box.querySelectorAll("[data-rm]").forEach((b) => b.addEventListener("click", () => removeItem(b.dataset.rm)));
+}
+
+function renderItems() {
+  const card = $("#itemsCard");
+  if (!sel) { card.hidden = true; return; }
+  card.hidden = false;
+  $("#itemsTitle").innerHTML = `货架 ${sel.zone}-${sel.shelf_no} 上的商品 <span class="badge">${items.length}</span>`;
+  $("#items").innerHTML = items.length
+    ? `<tr><th>层</th><th>区域</th><th>SKU</th><th>品名</th><th>余量</th><th>登记人</th><th>登记时间</th></tr>` + items.map((r) =>
+      `<tr><td>${r.layer}</td><td${r.region > (sel.regions || 1) ? ' class="err-text" title="旧规则（件位）登记的，不在任何区域里。请移除后重新入库"' : ''}>${r.region}/${sel.regions || 1}</td><td class="mono">${esc(r.sku)}</td><td>${esc(r.name)}</td><td>${r.qty ?? "—"}</td>
+      <td>${esc(r.last_by)}</td><td class="note">${esc((r.last_at || "").slice(0, 16))}</td></tr>`).join("")
+    : '<tr><td colspan="7" class="muted">这个货架上还没有登记商品</td></tr>';
+}
+
+// ---------- SKU 输入 ----------
+let skuTimer, skuSeq = 0;
+$("#sku").addEventListener("input", () => {
+  renderPick();
+  clearTimeout(skuTimer);
+  skuTimer = setTimeout(lookupSku, 200);
+});
+$("#sku").addEventListener("keydown", (e) => { if (e.key === "Enter" && pick && $("#sku").value.trim()) inbound(); });
+$("#who").value = store.get("inb.who");
+$("#who").addEventListener("input", () => store.set("inb.who", $("#who").value));
+
+async function lookupSku() {
+  const q = $("#sku").value.trim(), seq = ++skuSeq;
+  if (!q) { $("#skuInfo").innerHTML = ""; $("#skuList").innerHTML = ""; return; }
+  let rows = [];
+  try { rows = await api("GET", `/api/skus?q=${encodeURIComponent(q)}&limit=30`); } catch { /* 忽略 */ }
+  if (seq !== skuSeq) return;
+  $("#skuList").innerHTML = rows.map((r) => `<option value="${esc(r.sku)}">${esc(r.name)}</option>`).join("");
+  const hit = rows.find((r) => r.sku.toUpperCase() === q.toUpperCase());
+  $("#skuInfo").innerHTML = hit ? `<span class="ok-text">✔ ${esc(hit.name || "（字典里没有品名）")}</span>`
+    : (rows.length ? `<span class="muted">字典里有 ${rows.length} 个相近的，可在输入框下拉选择</span>`
+      : '<span class="warn-text">这个 SKU 不在商品字典里（仍可入库，但请确认没有写错）</span>');
+}
+
+// ---------- 手动入库 / 移除 ----------
+// 登记时间不用填：这里只是显示当前时间，真正的时间由服务器在提交那一刻写入日志
+const two = (n) => String(n).padStart(2, "0");
+function tick() {
+  const d = new Date();
+  $("#when").value = `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}`;
+}
+tick(); setInterval(tick, 1000);
+
+async function inbound() {
+  const sku = $("#sku").value.trim();
+  if (!sel || !pick || !sku) return;
+  const q = $("#qty").value.trim();
+  try {
+    const r = await api("POST", "/api/stock", {
+      sku, wh, zone: sel.zone, shelf: sel.shelf_no, layer: pick.layer, region: pick.region,
+      qty: q === "" ? null : parseInt(q, 10), who: $("#who").value.trim(),
+    });
+    toast(`已入库 ${r.sku} → ${r.code}（${r.at}）`);
+    $("#sku").value = ""; $("#qty").value = ""; $("#skuInfo").innerHTML = "";
+    await refreshShelves();
+    await selectShelf(sel, true);        // 位置保持不变：同一个区域可以接着入库下一种商品
+    $("#sku").focus();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function removeItem(sku) {
+  if (!confirm(`确定把 ${sku} 从 ${curCode()} 移除吗？`)) return;
+  try {
+    await api("POST", "/api/stock", { sku, wh, zone: sel.zone, shelf: sel.shelf_no, layer: pick.layer, region: pick.region,
+      action: "移除", who: $("#who").value.trim() });
+    toast(`已移除 ${sku}`);
+    await refreshShelves();
+    await selectShelf(sel, true);
+  } catch (e) { toast(e.message, true); }
+}
+
+async function refreshShelves() {
+  shelves = await api("GET", `/api/shelves/${wh}`);
+  indexBlocks();
+  if (sel) sel = shelves.find((s) => s.zone === sel.zone && s.shelf_no === sel.shelf_no) || sel;
+}
+
+$("#wh").addEventListener("change", async () => { wh = $("#wh").value; store.set("inb.wh", wh); await loadWh(); });
+loadWarehouses().catch((e) => toast(e.message, true));
+</script>
+</body>
+</html>

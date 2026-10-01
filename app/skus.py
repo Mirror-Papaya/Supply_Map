@@ -67,7 +67,7 @@ def upsert(rows: list) -> int:
 # ---------- 表格文件读取（SKU 字典导入 / Excel 拣货单共用） ----------
 
 SKU_HEADERS = ["商家sku", "卖家sku", "seller sku", "merchant sku", "商家编码", "sku编码", "sku", "货号", "商品编码",
-               "编码", "item code", "code", "product code", "model"]
+               "编码", "item code", "item no", "code", "product code", "model"]
 NAME_HEADERS = ["商品名称", "品名", "名称", "产品名称", "product name", "item name", "name", "description", "描述"]
 QTY_HEADERS = ["拣货数量", "数量", "qty", "quantity", "件数", "pcs"]
 ALIAS_HEADERS = ["别名", "旧码", "旧sku", "原码", "alias", "aliases", "old sku"]

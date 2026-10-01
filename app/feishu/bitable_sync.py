@@ -7,6 +7,7 @@ import logging
 import time
 from datetime import datetime
 
+import lark_oapi as lark
 from lark_oapi.api.bitable.v1 import (AppTableCreateHeader, AppTableFieldProperty, AppTableFieldPropertyOption,
                                       AppTableRecord, BatchUpdateAppTableRecordRequest,
                                       BatchUpdateAppTableRecordRequestBody, Condition, CreateAppTableRequest,
@@ -18,7 +19,8 @@ from . import client as fc
 
 log = logging.getLogger("bitable")
 
-F_SKU, F_WH, F_ZONE, F_SHELF, F_LAYER, F_PACK = "SKU", "仓库号", "区块", "货架", "层", "包装备注"
+F_SKU, F_WH, F_ZONE, F_SHELF, F_LAYER, F_REGION = "SKU", "仓库号", "区块", "货架", "层", "区域"
+F_REGION_OLD = ("件位", "包装备注")      # 旧版表单里第 5 段的字段名，兼容读取
 F_CODE, F_QTY, F_ACTION, F_NOTE = "库位码", "余量", "操作", "备注"
 F_USER, F_TIME, F_STATE, F_MSG = "提交人", "提交时间", "处理状态", "处理说明"
 QUIET_SECONDS = 20
@@ -48,9 +50,9 @@ def _num(v):
 
 
 def record_to_entry(record_id: str, f: dict):
-    """返回 (Entry, 解析问题)。库位码字段优先；为空时用 仓库号/区块/货架/层/包装备注 拼。"""
+    """返回 (Entry, 解析问题)。库位码字段优先；为空时用 仓库号/区块/货架/层/区域 拼（区域总数按货架设置补全）。"""
     code_text = _text(f.get(F_CODE))
-    parts = [f.get(k) for k in (F_WH, F_ZONE, F_SHELF, F_LAYER, F_PACK)]
+    parts = [f.get(k) for k in (F_WH, F_ZONE, F_SHELF, F_LAYER)] + [next((f.get(k) for k in (F_REGION, *F_REGION_OLD) if f.get(k) is not None), None)]
     if not code_text and any(_text(p) for p in parts):
         loc = codes.from_parts(*[_text(p) or "" for p in parts])
         code_text = loc.code if loc else "-".join(_text(p) or "?" for p in parts)
@@ -161,7 +163,7 @@ def create_table(app_token: str, name: str = "库存登记") -> str:
                               if p else AppTableCreateHeader.builder().field_name(n).type(t).build())
     fields = [
         H(F_SKU, 1), H(F_WH, 3, _opt(whs)), H(F_ZONE, 3, _opt(zones)), H(F_SHELF, 2, num), H(F_LAYER, 2, num),
-        H(F_PACK, 2, num), H(F_QTY, 2, num), H(F_ACTION, 3, _opt([stock.REGISTER, stock.REMOVE])), H(F_NOTE, 1),
+        H(F_REGION, 2, num), H(F_QTY, 2, num), H(F_ACTION, 3, _opt([stock.REGISTER, stock.REMOVE])), H(F_NOTE, 1),
         H(F_CODE, 1), H(F_USER, 1003), H(F_TIME, 1001), H(F_STATE, 3, _opt(["成功", "失败"])), H(F_MSG, 1),
     ]
     req = (CreateAppTableRequest.builder().app_token(app_token)
@@ -172,7 +174,46 @@ def create_table(app_token: str, name: str = "库存登记") -> str:
     try:
         vreq = (CreateAppTableViewRequest.builder().app_token(app_token).table_id(table_id)
                 .request_body(ReqView.builder().view_name("登记表单").view_type("form").build()).build())
-        fc._check(fc.client().bitable.v1.app_table_view.create(vreq), "创建表单视图")
+        view = fc._check(fc.client().bitable.v1.app_table_view.create(vreq), "创建表单视图").data.view
+        configure_form(app_token, table_id, view.view_id)
     except Exception as e:  # noqa: BLE001
-        log.warning("自动创建表单视图失败（可在多维表格里手动添加表单视图）：%s", e)
+        log.warning("自动创建 / 配置表单视图失败（可在多维表格里手动添加表单视图）：%s", e)
     return table_id
+
+
+# 表单里要填的字段（必填 / 选填 + 提示）和对员工隐藏的系统字段
+FORM_FIELDS = {
+    F_SKU: dict(required=True, description="商品编码，如 B40006"),
+    F_WH: dict(required=True), F_ZONE: dict(required=True),
+    F_SHELF: dict(required=True, description="两位数字，如 01"),
+    F_LAYER: dict(required=True, description="从下往上数，如 3"),
+    F_REGION: dict(required=True, description="这一层从左往右数的第几个区域，如 3（总数按货架设置自动补全）"),
+    F_QTY: dict(required=False, description="盘点数，选填"),
+    F_ACTION: dict(required=False, description="不选默认是登记；货已不在这个位置时选移除"),
+    F_NOTE: dict(required=False),
+    F_CODE: dict(visible=False), F_STATE: dict(visible=False), F_MSG: dict(visible=False),
+}
+
+
+def configure_form(app_token: str, table_id: str, form_id: str) -> str:
+    """设置表单字段的必填 / 隐藏，并开启"公司内可填写"的分享。返回分享链接。"""
+    import json
+
+    def call(method, uri, body=None):
+        b = lark.BaseRequest.builder().http_method(method).uri(uri).token_types({lark.AccessTokenType.TENANT})
+        if body is not None:
+            b = b.body(body)
+        d = json.loads(fc.client().request(b.build()).raw.content)
+        if d.get("code") != 0:
+            raise fc.FeishuError(f"{uri} 失败：code={d.get('code')} msg={d.get('msg')}")
+        return d.get("data") or {}
+
+    base = f"/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/forms/{form_id}"
+    ids = {x["title"]: x["field_id"] for x in call(lark.HttpMethod.GET, base + "/fields").get("items", [])}
+    for title, patch in FORM_FIELDS.items():
+        if title in ids:
+            call(lark.HttpMethod.PATCH, f"{base}/fields/{ids[title]}", patch)
+    call(lark.HttpMethod.PATCH, base, {
+        "name": "库存登记表单", "shared": True, "shared_limit": "tenant_editable",
+        "description": "登记货品放在哪个货架：填 SKU、仓库号、区块、货架、层、区域。提交后系统自动入库。"})
+    return call(lark.HttpMethod.GET, base).get("form", {}).get("shared_url", "")

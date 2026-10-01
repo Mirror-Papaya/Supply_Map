@@ -160,15 +160,25 @@ def render(m: dict, highlights: dict | None = None, show_zones: bool = True, tit
             cx, cy = X(cc + 0.5), Y(rr + 0.5)
             _center_text(d, (cx - s, cy - s, cx + s, cy + s), z, _hex(zi["color"]), s, stroke=2)
 
-    # 拣货序号徽标
-    for b in hl_blocks:
-        seq = highlights[(b["zone"], b["shelf"])]
-        r0, c0, _, _ = b["bbox"]
-        rad = max(12, int(cp * 0.75), int(W / 70))
-        cx = min(max(X(c0), rad + 1), W - rad - 1)
-        cy = min(max(Y(r0), oy + rad + 1), oy + H - rad - 1)
-        d.ellipse([cx - rad, cy - rad, cx + rad, cy + rad], fill=HILITE, outline=(255, 255, 255), width=2)
-        _center_text(d, (cx - rad, cy - rad, cx + rad, cy + rad), str(seq), (255, 255, 255), int(rad * 1.2))
+    # 红点：每个目标货架在上边缘中间放一个红色圆点（带光圈），点里是拣货顺序
+    if hl_blocks:
+        rad = max(14, int(cp * 0.8), int(W / 60))
+        pins = []
+        for b in hl_blocks:
+            r0, c0, _, c1 = b["bbox"]
+            cx = (X(c0) + X(c1 + 1)) // 2
+            cy = min(max(Y(r0), oy + rad + 4), oy + H - rad - 4)
+            pins.append((cx, cy, highlights[(b["zone"], b["shelf"])]))
+        halo = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        hd = ImageDraw.Draw(halo)
+        for cx, cy, _ in pins:
+            hr = int(rad * 1.9)
+            hd.ellipse([cx - hr, cy - hr, cx + hr, cy + hr], fill=HILITE + (60,))
+        img = Image.alpha_composite(img.convert("RGBA"), halo).convert("RGB")
+        d = ImageDraw.Draw(img)
+        for cx, cy, seq in pins:
+            d.ellipse([cx - rad, cy - rad, cx + rad, cy + rad], fill=HILITE, outline=(255, 255, 255), width=3)
+            _center_text(d, (cx - rad, cy - rad, cx + rad, cy + rad), str(seq), (255, 255, 255), int(rad * 1.25))
 
     # 标题栏
     d.rectangle([0, 0, W, head_h - 1], fill=(241, 243, 245))
@@ -176,7 +186,7 @@ def render(m: dict, highlights: dict | None = None, show_zones: bool = True, tit
     hs = int(head_h * 0.46)
     d.text((head_h * 0.3, (head_h - hs * 1.15) / 2), head, font=font(hs), fill=TEXT)
     if highlights:
-        tip = f"红色 = 本次拣货货架（共 {len(highlights)} 个，数字为拣货顺序）"
+        tip = f"红点 = 要去的货架（共 {len(highlights)} 个，数字是拣货顺序）"
         ts = int(head_h * 0.34)
         tw = d.textlength(tip, font=font(ts))
         if tw + head_h + d.textlength(head, font=font(hs)) < W:

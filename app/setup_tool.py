@@ -36,9 +36,27 @@ def check():
         except Exception as e:  # noqa: BLE001
             print(f"  ✗ {e}")
             ok = False
-    print("== Claude 图片识别 ==")
-    if not config.ANTHROPIC_API_KEY:
-        print("  ✗ .env 里没有 ANTHROPIC_API_KEY")
+    print("== 图片识别 ==")
+    provider = config.vision_provider()
+    if provider == "deepseek":
+        import httpx
+        try:
+            r = httpx.get(f"{config.DEEPSEEK_BASE_URL}/models", headers={"Authorization": f"Bearer {config.DEEPSEEK_API_KEY}"},
+                          timeout=20)
+            if r.status_code == 401:
+                raise RuntimeError("DEEPSEEK_API_KEY 无效")
+            r.raise_for_status()
+            ids = [m.get("id") for m in r.json().get("data", [])]
+            if config.DEEPSEEK_MODEL in ids:
+                print(f"  ✓ DeepSeek API Key 有效，模型 {config.DEEPSEEK_MODEL} 可用")
+            else:
+                print(f"  ✗ API Key 有效，但没有模型 {config.DEEPSEEK_MODEL}（可用：{', '.join(ids)}）")
+                ok = False
+        except Exception as e:  # noqa: BLE001
+            print(f"  ✗ {e}")
+            ok = False
+    elif not config.ANTHROPIC_API_KEY:
+        print("  ✗ .env 里没有 DEEPSEEK_API_KEY（或 ANTHROPIC_API_KEY）")
         ok = False
     else:
         import anthropic

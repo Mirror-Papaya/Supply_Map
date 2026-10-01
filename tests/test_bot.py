@@ -30,35 +30,35 @@ def msg(text, chat_type="p2p", mentioned=False, mid="m1"):
 
 def test_register_via_chat(saved_map):
     r = FakeResponder()
-    bot.handle(msg("登记\nSKU-1 01-A-01-2-0 40\nSKU-2 01-A-09-1-0\nbad"), r)
+    bot.handle(msg("登记\nSKU-1 01-A-01-02-1/5 40\nSKU-2 01-A-09-01-1/5\nbad"), r)
     kind, text = r.out[0]
     assert kind == "text" and "成功 1 条" in text and "失败 2 条" in text and "没有 09 号货架" in text
     rows = stock.locations_of(["SKU-1"])["SKU-1"]
-    assert rows[0]["qty"] == 40 and rows[0]["last_by"] == "张三" and rows[0]["last_method"] == "聊天"
+    assert rows[0]["qty"] == 40 and rows[0]["last_by"] == "张三" and rows[0]["last_method"] == "自动入库"
     # 同一条消息重复推送不会重复登记
     r2 = FakeResponder()
-    bot.handle(msg("登记\nSKU-1 01-A-01-2-0 40"), r2)
+    bot.handle(msg("登记\nSKU-1 01-A-01-02-1/5 40"), r2)
     assert len(stock.recent_logs()) == 1
 
 
 def test_group_requires_mention(saved_map):
     r = FakeResponder()
-    bot.handle(msg("登记 SKU-1 01-A-01-2-0", chat_type="group"), r)
+    bot.handle(msg("登记 SKU-1 01-A-01-02-1/5", chat_type="group"), r)
     assert r.out == []
-    bot.handle(msg("登记 SKU-1 01-A-01-2-0", chat_type="group", mentioned=True), r)
+    bot.handle(msg("登记 SKU-1 01-A-01-02-1/5", chat_type="group", mentioned=True), r)
     assert "成功 1 条" in r.out[0][1]
 
 
 def test_text_query_card(saved_map):
     skus.upsert([{"sku": "A1", "name": "扳手"}])
-    stock.apply([stock.Entry("A1", "01-A-01-1-0", 3)], "聊天", "u", "李四")
+    stock.apply([stock.Entry("A1", "01-A-01-01-1/5", 3)], "聊天", "u", "李四")
     r = FakeResponder()
     bot.handle(msg("查询 A1 5 NOPE"), r)
     kinds = [k for k, _ in r.out]
     assert kinds == ["card"]
     card = r.out[0][1]
     body = json.dumps(card, ensure_ascii=False)
-    assert "01-A-01-1-0" in body and "余量不足" in body and "NOPE" in body
+    assert "01-A-01-01-1/5" in body and "余量不足" in body and "NOPE" in body
     assert any(e.get("tag") == "img" for e in card["body"]["elements"])
     # 不带指令、但是已知 SKU → 直接查询
     r = FakeResponder()
@@ -72,7 +72,7 @@ def test_text_query_card(saved_map):
 
 def test_image_query(saved_map, monkeypatch):
     skus.upsert([{"sku": "SKU-000123", "name": "USB充电线"}])
-    stock.apply([stock.Entry("SKU-000123", "01-B-01-1-0")], "聊天")
+    stock.apply([stock.Entry("SKU-000123", "01-B-01-01-1/5")], "聊天")
     monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "test")
     monkeypatch.setattr(vision, "extract", lambda imgs: {"is_pick_list": True, "rows": [
         {"sku": "SKU-OOO123", "alt": [], "name": "USB充电线", "qty": 2},
@@ -110,7 +110,7 @@ def test_excel_file_query(saved_map):
     from openpyxl import Workbook
     import io
     skus.upsert([{"sku": "A1", "name": "扳手"}])
-    stock.apply([stock.Entry("A1", "01-A-02-0-0", 9)], "聊天")
+    stock.apply([stock.Entry("A1", "01-A-02-00-1/5", 9)], "聊天")
     wb = Workbook()
     ws = wb.active
     ws.append(["商家SKU", "商品名称", "数量"])
@@ -120,24 +120,24 @@ def test_excel_file_query(saved_map):
     r = FakeResponder({"f1": buf.getvalue()})
     bot.handle(bot.Incoming("m4", "oc", "p2p", "file", {"file_key": "f1", "file_name": "拣货单.xlsx"}), r)
     body = json.dumps(r.out[-1][1], ensure_ascii=False)
-    assert "01-A-02-0-0" in body
+    assert "01-A-02-00-1/5" in body
 
 
 def test_card_fallback_to_text(saved_map):
-    stock.apply([stock.Entry("A1", "01-A-02-0-0", 9)], "聊天")
+    stock.apply([stock.Entry("A1", "01-A-02-00-1/5", 9)], "聊天")
 
     class Broken(FakeResponder):
         def card(self, card): raise RuntimeError("card schema error")
 
     r = Broken()
     bot.handle(msg("查询 A1"), r)
-    assert r.out[0][0] == "text" and "01-A-02-0-0" in r.out[0][1]
+    assert r.out[0][0] == "text" and "01-A-02-00-1/5" in r.out[0][1]
     assert r.out[1][0] == "image"
 
 
 def test_xlsx_export(saved_map):
     from app import query
-    stock.apply([stock.Entry("A1", "01-A-02-0-0", 9)], "聊天")
+    stock.apply([stock.Entry("A1", "01-A-02-00-1/5", 9)], "聊天")
     data = cards.result_xlsx(query.run([{"sku": "A1", "qty": 1}, {"sku": "X", "qty": 1}]))
     assert data[:2] == b"PK"
 
@@ -148,11 +148,13 @@ def test_bitable_record_parsing(saved_map):
     e, problem = bitable_sync.record_to_entry("rec1", {
         "SKU": [{"text": "SKU-9", "type": "text"}], "仓库号": "01", "区块": "A", "货架": 2.0, "层": 0.0,
         "包装备注": 1.0, "余量": 12.0})
-    assert not problem and e.loc_text == "01-A-02-0-1" and e.qty == 12 and e.source_id == "bitable:rec1"
+    assert not problem and e.loc_text == "01-A-02-00-1" and e.qty == 12 and e.source_id == "bitable:rec1"
     e, _ = bitable_sync.record_to_entry("rec2", {"SKU": "S", "库位码": [{"text": "01a0110"}], "操作": "移除"})
     assert e.loc_text == "01a0110" and e.action == "移除" and e.qty is None
-    _, problem = bitable_sync.record_to_entry("rec3", {"SKU": "S", "库位码": "01-A-01-1-0", "余量": "很多"})
+    _, problem = bitable_sync.record_to_entry("rec3", {"SKU": "S", "库位码": "01-A-01-01-1/5", "余量": "很多"})
     assert problem
+    e2, _ = bitable_sync.record_to_entry("rec9", {"SKU": "S", "仓库号": "01", "区块": "A", "货架": 1.0, "层": 3.0, "区域": 3.0})
+    assert e2.loc_text == "01-A-01-03-3" and stock.check(e2).code == "01-A-01-03-3/5"     # 区域字段；总数按货架补全
 
 
 def test_bitable_sync_once(saved_map, monkeypatch):
@@ -164,10 +166,10 @@ def test_bitable_sync_once(saved_map, monkeypatch):
 
     import time
     old = time.time() * 1000 - 60_000
-    recs = [Rec("r1", {"SKU": "S1", "库位码": "01-A-01-1-0", "余量": 5,
+    recs = [Rec("r1", {"SKU": "S1", "库位码": "01-A-01-01-1/5", "余量": 5,
                        "提交人": [{"id": "ou_9", "name": "王五"}]}, old),
-            Rec("r2", {"SKU": "S2", "库位码": "01-Z-01-1-0", "提交人": [{"id": "ou_9", "name": "王五"}]}, old),
-            Rec("r3", {"SKU": "S3", "库位码": "01-A-01-1-0"}, time.time() * 1000),     # 刚编辑，暂不处理
+            Rec("r2", {"SKU": "S2", "库位码": "01-Z-01-01-1/5", "提交人": [{"id": "ou_9", "name": "王五"}]}, old),
+            Rec("r3", {"SKU": "S3", "库位码": "01-A-01-01-1/5"}, time.time() * 1000),     # 刚编辑，暂不处理
             Rec("r4", {}, old)]                                                         # 空行
     monkeypatch.setattr(bitable_sync, "_pending_records", lambda: recs)
     updates, sent = [], []
@@ -190,3 +192,25 @@ def test_bitable_sync_once(saved_map, monkeypatch):
     assert "没有区块 Z" in by_id["r2"]["处理说明"] and len(sent) == 1
     row = stock.locations_of(["S1"])["S1"][0]
     assert row["qty"] == 5 and row["last_by"] == "王五" and row["last_method"] == "表单"
+
+
+def test_pdf_file_query(saved_map, monkeypatch):
+    skus.upsert([{"sku": "DL016", "name": "HOOK KNIFE"}])
+    stock.apply([stock.Entry("DL016", "01-A-01-02-3/5", 9)], "聊天")
+    monkeypatch.setattr(config, "DEEPSEEK_API_KEY", "sk-test")
+    monkeypatch.setattr(vision, "extract_pdf", lambda data: {"is_pick_list": True, "pages": 1, "truncated": False, "rows": [
+        {"sku": "DL016_P3", "alt": ["DL016"], "name": "Deli cutter", "qty": 1},
+        {"sku": "DL016_P3", "alt": [], "name": "Deli cutter", "qty": 1}]})
+    r = FakeResponder({"f9": b"%PDF"})
+    bot.handle(bot.Incoming("m8", "oc", "p2p", "file", {"file_key": "f9", "file_name": "BigSeller - Orders.pdf"}), r)
+    assert "正在识别" in r.out[0][1]
+    body = json.dumps(r.out[-1][1], ensure_ascii=False)
+    assert "01-A-01-02-3/5" in body and "DL016" in body
+
+
+def test_pdf_without_vision_key(saved_map, monkeypatch):
+    for k in ("DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.setattr(config, k, "")
+    r = FakeResponder({"f9": b"%PDF"})
+    bot.handle(bot.Incoming("m8", "oc", "p2p", "file", {"file_key": "f9", "file_name": "a.pdf"}), r)
+    assert "还没有配置图片识别" in r.out[0][1]

@@ -1,11 +1,15 @@
 """把识别/输入得到的 SKU 文本匹配到已知 SKU（商品字典 + 已登记过的 SKU）。
 
-匹配顺序：精确 → 去符号 → 易混字符归一(O/0、I/1…) → 相似度 → 品名相似度。
+匹配顺序：精确 → 去符号 → 易混字符归一(O/0、I/1…) → 去平台变体后缀(DL016_P3 → DL016) → 相似度 → 品名相似度。
+都对不上时，按品名里的关键词给出"可能是"的候选（只提示，不自动匹配）。
 """
 import difflib
 import re
 
 from . import db, skus
+
+# 品名关键词：只取 3 个字母以上的单词，且去掉太通用的词，避免 "6 inch" 之类造成乱候选
+NAME_STOP = {"THE", "AND", "FOR", "WITH", "PCS", "SET", "STOCK", "NEW", "PRO", "BSI", "SUPPLY", "FREE", "BUY", "GET"}
 
 CONFUSABLE = str.maketrans({"O": "0", "I": "1", "L": "1", "Z": "2", "S": "5", "B": "8"})
 
@@ -56,6 +60,10 @@ class Index:
                 return {"sku": next(iter(hit)), "method": "纠错", "candidates": []}
             if len(hit) > 1:
                 return {"sku": None, "method": "未匹配", "candidates": sorted(hit)[:5]}
+            if "_" in t:        # 平台变体后缀：DL016_P3 → DL016（只在去掉后能精确对上字典时才算）
+                base = t.rsplit("_", 1)[0]
+                if len(base) >= 3 and skus.key(base) in self.canon:
+                    return {"sku": self.canon[skus.key(base)], "method": "去后缀", "candidates": []}
             if len(p) >= 5:
                 close = difflib.get_close_matches(p, self._plain_keys, n=3, cutoff=0.86)
                 cands = sorted({s for k in close for s in self.plain[k]})
@@ -73,4 +81,22 @@ class Index:
                     best, best_s = s, score
             if best and best_s >= 0.85:
                 return {"sku": best, "method": "品名", "candidates": []}
+            cands = self._name_candidates(name)
+            if cands:
+                return {"sku": None, "method": "未匹配", "candidates": cands}
         return {"sku": None, "method": "未匹配", "candidates": []}
+
+    @staticmethod
+    def _words(text: str) -> set:
+        return {w for w in re.findall(r"[A-Z]{3,}", (text or "").upper()) if w not in NAME_STOP}
+
+    def _name_candidates(self, name: str) -> list:
+        """订单品名和字典品名有 ≥2 个相同关键词、且覆盖字典品名 60% 以上的，作为候选。"""
+        mine = self._words(name)
+        scored = []
+        for s, n in self.names.items():
+            theirs = self._words(n)
+            shared = len(mine & theirs)
+            if theirs and shared >= 2 and shared / len(theirs) >= 0.6:
+                scored.append((-shared / len(theirs), -shared, s))
+        return [s for _, _, s in sorted(scored)[:3]]

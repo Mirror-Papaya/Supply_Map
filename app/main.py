@@ -46,7 +46,12 @@ def main():
     setup_logging()
     log = logging.getLogger("main")
     db.connect()
-    status.set(started_at=db.now(), vision="已配置" if config.ANTHROPIC_API_KEY else "未配置")
+    if db.kv_get("needs_rebuild"):
+        from . import stock
+        log.info("旧库升级：按日志重算当前库位，共 %s 条日志", stock.rebuild_current())
+        db.kv_set("needs_rebuild", "")
+    provider = {"deepseek": "DeepSeek", "anthropic": "Claude"}.get(config.vision_provider(), "")
+    status.set(started_at=db.now(), vision="已配置" if provider else "未配置", vision_provider=provider)
     threading.Thread(target=backup_loop, name="backup", daemon=True).start()
 
     if config.feishu_enabled():

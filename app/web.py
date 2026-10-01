@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import config, db, maps, parse_text, query, render, skus, status, stock
+from . import codes, config, db, maps, parse_text, query, render, skus, status, stock, vision
 
 app = FastAPI(title="库存地图", docs_url=None, redoc_url=None)
 app.mount("/static", StaticFiles(directory=config.WEB_DIR), name="static")
@@ -35,6 +35,11 @@ def index():
 @app.get("/editor")
 def editor():
     return FileResponse(config.WEB_DIR / "editor.html")
+
+
+@app.get("/inbound")
+def inbound():
+    return FileResponse(config.WEB_DIR / "inbound.html")
 
 
 # ---------- 仓库与地图 ----------
@@ -139,6 +144,42 @@ def shelf_contents(wh_no: str, zone: str, shelf_no: str):
     return rows
 
 
+@app.get("/api/shelves/{wh_no}")
+def list_shelves(wh_no: str):
+    """某仓库所有货架（地图保存后才有）及其当前登记条数，入库页用来点选货架。"""
+    return db.query(
+        "SELECT s.zone, s.shelf_no, s.layer_min, s.layer_max, s.regions, s.block_id, "
+        "(SELECT COUNT(*) FROM current_stock c WHERE c.wh_no=s.wh_no AND c.zone=s.zone AND c.shelf_no=s.shelf_no) AS n "
+        "FROM shelf s WHERE s.wh_no=? ORDER BY s.zone, s.shelf_no", (_wh(wh_no),))
+
+
+class StockIn(BaseModel):
+    sku: str
+    wh: str
+    zone: str
+    shelf: str
+    layer: int
+    region: int
+    qty: int | None = None
+    action: str = stock.REGISTER
+    note: str = ""
+    who: str = ""
+
+
+@app.post("/api/stock")
+def post_stock(b: StockIn):
+    """手动入库 / 移除：选好货架、层、区域后登记一条。登记时间由服务器在提交时记录。"""
+    loc = codes.from_parts(b.wh, b.zone, b.shelf, b.layer, b.region)
+    if not loc:
+        raise HTTPException(400, "库位不对：层 0–99，区域从 1 开始")
+    e = stock.Entry(sku=b.sku, loc_text=loc.code, qty=b.qty, action=b.action, note=b.note)
+    at = db.now()
+    r = stock.apply([e], stock.METHOD_MANUAL, "web", b.who.strip() or "未填", created_at=at)[0]
+    if not r.ok:
+        raise HTTPException(400, r.msg)
+    return {"code": r.code, "sku": r.sku, "warnings": r.warnings, "at": at}
+
+
 # ---------- 查询 / 日志 / 字典 ----------
 
 @app.get("/api/status")
@@ -146,10 +187,7 @@ def get_status():
     return {"status": status.get(), "stats": stock.stats(), "strict_sku": config.STRICT_SKU}
 
 
-@app.get("/api/search")
-def search(q: str):
-    demands = parse_text.parse("查询 " + q).demands
-    res = query.run(demands)
+def _result_payload(res: dict) -> dict:
     return {
         "lines": [{"seq": ln["seq"], "sku": ln["item"]["sku"], "name": ln["item"]["name"],
                    "need": ln["item"]["qty"], "loc": ln["row"]["loc_code"], "qty": ln["row"]["qty"],
@@ -160,6 +198,43 @@ def search(q: str):
         "hl": {wh: ",".join(f"{z}-{s}" for (z, s), _ in sorted(v.items(), key=lambda x: x[1]))
                for wh, v in res["warehouses"].items()},
     }
+
+
+@app.get("/api/search")
+def search(q: str):
+    return _result_payload(query.run(parse_text.parse("查询 " + q).demands))
+
+
+@app.post("/api/pick")
+def pick(file: UploadFile = File(...)):
+    """上传拣货单（图片 / PDF / Excel / CSV）→ 识别 → 库位表 + 地图红点定位。"""
+    name = (file.filename or "").lower()
+    data = file.file.read()
+    try:
+        if name.endswith((".xlsx", ".xls", ".csv")):
+            rows = skus.rows_from_table(skus.read_table(name, data), want=("sku", "name", "qty"))
+            if not rows:
+                raise HTTPException(400, "没找到 SKU 列（表头需包含 SKU / 商家编码 / 货号 之一）")
+            demands = [{"sku": r["sku"], "qty": int(q) if (q := (r.get("qty") or "").split(".")[0]).isdigit() else None,
+                        "name": r.get("name", ""), "alt": []} for r in rows]
+            source = "表格"
+        else:
+            if not config.vision_enabled():
+                raise HTTPException(400, "还没有配置图片识别（.env 里填 DEEPSEEK_API_KEY 或 ANTHROPIC_API_KEY）")
+            out = vision.extract_pdf(data) if name.endswith(".pdf") else vision.extract([data])
+            if not out["rows"]:
+                raise HTTPException(400, "这个文件里没有识别到拣货商品，请换一张清晰、完整的拣货单")
+            demands = [{"sku": r["sku"], "qty": r["qty"], "name": r["name"], "alt": r["alt"]} for r in out["rows"]]
+            source = "PDF 识别" if name.endswith(".pdf") else "图片识别"
+    except vision.VisionError as e:
+        raise HTTPException(400, str(e))
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001 - 文件格式五花八门，统一提示
+        raise HTTPException(400, f"读取文件失败：{e}")
+    out = _result_payload(query.run(demands))
+    out["source"], out["rows"] = source, len(demands)
+    return out
 
 
 @app.get("/api/logs")
@@ -188,19 +263,3 @@ async def import_skus(file: UploadFile = File(...)):
     n = skus.upsert(rows)
     headers = table[header_row]
     return {"imported": n, "columns": {k: headers[v] for k, v in cols.items()}, "total": skus.count()}
-
-
-@app.get("/api/pack_codes")
-def get_pack_codes():
-    return db.query("SELECT * FROM pack_code ORDER BY code")
-
-
-@app.put("/api/pack_codes")
-def put_pack_codes(items: list[dict]):
-    with db.tx() as c:
-        c.execute("DELETE FROM pack_code")
-        for it in items:
-            code = str(it.get("code", "")).strip()
-            if re.fullmatch(r"\d", code) and str(it.get("meaning", "")).strip():
-                c.execute("INSERT INTO pack_code(code, meaning) VALUES(?,?)", (code, str(it["meaning"]).strip()))
-    return get_pack_codes()

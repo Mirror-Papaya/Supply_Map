@@ -16,10 +16,20 @@ WEB_DIR = ROOT / "web"
 
 FEISHU_APP_ID = os.getenv("FEISHU_APP_ID", "").strip()
 FEISHU_APP_SECRET = os.getenv("FEISHU_APP_SECRET", "").strip()
+# feishu = 国内飞书（open.feishu.cn）；lark = 国际版 Lark（open.larksuite.com）
+FEISHU_DOMAIN = os.getenv("FEISHU_DOMAIN", "feishu").strip().lower()
+FEISHU_BASE_URL = "https://open.larksuite.com" if FEISHU_DOMAIN == "lark" else "https://open.feishu.cn"
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-opus-5").strip()
 CLAUDE_EFFORT = os.getenv("CLAUDE_EFFORT", "medium").strip()   # low / medium / high：识别细致度与速度的平衡
+
+# DeepSeek（OpenAI 兼容接口）：deepseek-flash 支持图片输入
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "").strip()
+DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-flash").strip()
+DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip().rstrip("/")
+# auto：有 DeepSeek Key 用 DeepSeek，否则有 Anthropic Key 用 Claude；也可以固定写 deepseek / anthropic
+VISION_PROVIDER = os.getenv("VISION_PROVIDER", "auto").strip().lower()
 
 BITABLE_APP_TOKEN = os.getenv("BITABLE_APP_TOKEN", "").strip()
 BITABLE_TABLE_ID = os.getenv("BITABLE_TABLE_ID", "").strip()
@@ -38,6 +48,21 @@ FONT_PATH = os.getenv("FONT_PATH", r"C:\Windows\Fonts\msyh.ttc")
 
 for d in (DATA_DIR, MAP_ASSET_DIR, BACKUP_DIR, LOG_DIR):
     d.mkdir(parents=True, exist_ok=True)
+
+
+def vision_provider() -> str:
+    """当前用哪家识别图片："deepseek" / "anthropic" / ""（都没配）。"""
+    if VISION_PROVIDER == "deepseek":
+        return "deepseek" if DEEPSEEK_API_KEY else ""
+    if VISION_PROVIDER == "anthropic":
+        return "anthropic" if ANTHROPIC_API_KEY else ""
+    if DEEPSEEK_API_KEY:
+        return "deepseek"
+    return "anthropic" if ANTHROPIC_API_KEY else ""
+
+
+def vision_enabled() -> bool:
+    return bool(vision_provider())
 
 
 def feishu_enabled() -> bool:

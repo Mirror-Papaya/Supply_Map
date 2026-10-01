@@ -25,9 +25,11 @@ let layer = "blocks";
 let tool = "rect";
 let brushType = 2;
 let zoneLetter = "A", zoneErase = false;
+let selectedZone = "";   // 仓库区块图层里用选择工具点中的字母
 let show = { zones: true, grid: true, bg: true };
 let bgImg = null;
 let lastLayers = { min: 1, max: 4 };
+let lastRegions = 1;      // 新建货架时沿用上一次选的"每层区域数"
 let createdInStroke = 0;
 let drag = null;         // 当前拖拽：{kind: 'paint'|'rect'|'pan', ...}
 let spaceDown = false;
@@ -341,6 +343,41 @@ function realDraw() {
     ctx.stroke();
   }
 
+  // 选中的仓库区块：描出它的所有格子
+  if (layer === "zones" && selectedZone) {
+    const zc = selectedZone.charCodeAt(0);
+    ctx.strokeStyle = "#1c7ed6"; ctx.lineWidth = 3 / s;
+    ctx.beginPath();
+    for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
+      const i = r * cols + c;
+      if (Z[i] !== zc) continue;
+      if (c + 1 >= cols || Z[i + 1] !== zc) { ctx.moveTo((c + 1) * cs, r * cs); ctx.lineTo((c + 1) * cs, (r + 1) * cs); }
+      if (c === 0 || Z[i - 1] !== zc) { ctx.moveTo(c * cs, r * cs); ctx.lineTo(c * cs, (r + 1) * cs); }
+      if (r + 1 >= rows || Z[i + cols] !== zc) { ctx.moveTo(c * cs, (r + 1) * cs); ctx.lineTo((c + 1) * cs, (r + 1) * cs); }
+      if (r === 0 || Z[i - cols] !== zc) { ctx.moveTo(c * cs, r * cs); ctx.lineTo((c + 1) * cs, r * cs); }
+    }
+    ctx.stroke();
+  }
+
+  // 缩放手柄（仅矩形区块）
+  {
+    const rc = drag && drag.kind === "resize" ? drag.cur : resizableRect();
+    if (rc) {
+      if (drag && drag.kind === "resize") {
+        ctx.strokeStyle = "#1c7ed6"; ctx.lineWidth = 2 / s; ctx.setLineDash([6 / s, 4 / s]);
+        ctx.strokeRect(rc.c0 * cs, rc.r0 * cs, (rc.c1 - rc.c0 + 1) * cs, (rc.r1 - rc.r0 + 1) * cs);
+        ctx.setLineDash([]);
+      }
+      const hs = 8 / s;
+      ctx.fillStyle = "#fff"; ctx.strokeStyle = "#1c7ed6"; ctx.lineWidth = 1.5 / s;
+      for (const h of HANDLES) {
+        const p = handlePos(rc, h);
+        ctx.fillRect(p.x - hs / 2, p.y - hs / 2, hs, hs);
+        ctx.strokeRect(p.x - hs / 2, p.y - hs / 2, hs, hs);
+      }
+    }
+  }
+
   // 文字
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
@@ -396,10 +433,58 @@ function cellAt(ev) {
   return { r, c, inside: r >= 0 && c >= 0 && r < M.rows && c < M.cols };
 }
 
+// ---- 矩形区块的缩放手柄 ----
+const HANDLES = [
+  { dx: -1, dy: -1, cur: "nwse-resize" }, { dx: 0, dy: -1, cur: "ns-resize" }, { dx: 1, dy: -1, cur: "nesw-resize" },
+  { dx: -1, dy: 0, cur: "ew-resize" }, { dx: 1, dy: 0, cur: "ew-resize" },
+  { dx: -1, dy: 1, cur: "nesw-resize" }, { dx: 0, dy: 1, cur: "ns-resize" }, { dx: 1, dy: 1, cur: "nwse-resize" },
+];
+
+// 选中的是一个完整矩形的货架/功能区块时，返回它的范围；画笔涂出的不规则区块不支持缩放
+function resizableRect() {
+  if (layer !== "blocks" || !selected) return null;
+  const bi = binfo[selected];
+  if (!bi || bi.count !== (bi.r1 - bi.r0 + 1) * (bi.c1 - bi.c0 + 1)) return null;
+  return { r0: bi.r0, r1: bi.r1, c0: bi.c0, c1: bi.c1 };
+}
+
+function handlePos(rc, h) {
+  const cs = M.cell;
+  return {
+    x: h.dx < 0 ? rc.c0 * cs : h.dx > 0 ? (rc.c1 + 1) * cs : (rc.c0 + rc.c1 + 1) * cs / 2,
+    y: h.dy < 0 ? rc.r0 * cs : h.dy > 0 ? (rc.r1 + 1) * cs : (rc.r0 + rc.r1 + 1) * cs / 2,
+  };
+}
+
+function handleAt(ev) {
+  const rc = resizableRect();
+  if (!rc) return null;
+  const rect = cv.getBoundingClientRect();
+  const px = ev.clientX - rect.left, py = ev.clientY - rect.top;
+  for (const h of HANDLES) {
+    const p = handlePos(rc, h);
+    if (Math.abs(px - (p.x * view.scale + view.ox)) <= 7 && Math.abs(py - (p.y * view.scale + view.oy)) <= 7) return { h, rc };
+  }
+  return null;
+}
+
+// 把区块改成新范围。新范围里属于其他区块的格子保持不动（不会吞掉别的区块）
+function applyResize(id, nr) {
+  const type = M.blocks[id].type === "storage" ? 2 : 1;
+  pushUndo();
+  for (let i = 0; i < B.length; i++) if (B[i] === id) { B[i] = 0; T[i] = 0; }
+  for (let r = nr.r0; r <= nr.r1; r++) for (let c = nr.c0; c <= nr.c1; c++) {
+    const i = r * M.cols + c;
+    if (B[i] && B[i] !== id) continue;
+    T[i] = type; B[i] = id;
+  }
+  recompute(); setDirty(true); renderPanel(); draw();
+}
+
 function newBlock(type) {
   const id = M.next_id++;
   M.blocks[id] = type === 2
-    ? { type: "storage", shelf: "", layer_min: lastLayers.min, layer_max: lastLayers.max }
+    ? { type: "storage", shelf: "", layer_min: lastLayers.min, layer_max: lastLayers.max, regions: lastRegions }
     : { type: "function", label: "" };
   return id;
 }
@@ -497,9 +582,18 @@ cv.addEventListener("pointerdown", (ev) => {
     return;
   }
   if (ev.button !== 0) return;
+  const hit = handleAt(ev);
+  if (hit) {
+    drag = { kind: "resize", id: selected, h: hit.h, orig: hit.rc, cur: { ...hit.rc } };
+    return;
+  }
   const p = cellAt(ev);
   if (tool === "select") {
-    selected = p.inside ? B[p.r * M.cols + p.c] : 0;
+    if (layer === "zones") {
+      const z = p.inside ? Z[p.r * M.cols + p.c] : 0;
+      selectedZone = z ? String.fromCharCode(z) : "";
+      selected = 0;
+    } else selected = p.inside ? B[p.r * M.cols + p.c] : 0;
     renderPanel(); draw();
     return;
   }
@@ -529,7 +623,20 @@ cv.addEventListener("pointermove", (ev) => {
       ? ` · 货架 ${binfo[b]?.zone || "?"}-${M.blocks[b].shelf || "??"}` : ` · ${M.blocks[b].label || "功能区块"}`;
     coord.textContent = s;
   } else coord.textContent = "";
-  if (!drag) return;
+  if (!drag) {
+    const hit = handleAt(ev);
+    cv.style.cursor = hit ? hit.h.cur : (tool === "select" ? "pointer" : "crosshair");
+    return;
+  }
+  if (drag.kind === "resize") {
+    const rr = Math.max(0, Math.min(M.rows - 1, p.r)), cc = Math.max(0, Math.min(M.cols - 1, p.c));
+    const o = drag.orig, h = drag.h, n = { ...o };
+    if (h.dx < 0) n.c0 = Math.min(cc, o.c1); else if (h.dx > 0) n.c1 = Math.max(cc, o.c0);
+    if (h.dy < 0) n.r0 = Math.min(rr, o.r1); else if (h.dy > 0) n.r1 = Math.max(rr, o.r0);
+    drag.cur = n;
+    draw();
+    return;
+  }
   if (drag.kind === "pan") {
     view.ox = drag.ox + ev.clientX - drag.x;
     view.oy = drag.oy + ev.clientY - drag.y;
@@ -552,7 +659,11 @@ function finishDrag(ev) {
   drag = null;
   cv.style.cursor = "";
   if (d.kind === "paint") endStroke();
-  else if (d.kind === "rect") {
+  else if (d.kind === "resize") {
+    const o = d.orig, n = d.cur;
+    if (n.r0 !== o.r0 || n.r1 !== o.r1 || n.c0 !== o.c0 || n.c1 !== o.c1) applyResize(d.id, n);
+    else draw();
+  } else if (d.kind === "rect") {
     pushUndo();
     ensureZoneMeta();
     const target = strokeTarget(d.shift || (ev && ev.shiftKey));
@@ -563,7 +674,11 @@ function finishDrag(ev) {
   } else draw();
 }
 cv.addEventListener("pointerup", finishDrag);
-cv.addEventListener("pointercancel", () => { if (drag && drag.kind !== "pan") finishDrag(); drag = null; });
+cv.addEventListener("pointercancel", () => {
+  if (drag && drag.kind === "resize") { drag = null; draw(); return; }
+  if (drag && drag.kind !== "pan") finishDrag();
+  drag = null;
+});
 
 cv.addEventListener("wheel", (ev) => {
   if (!M) return;
@@ -586,7 +701,7 @@ window.addEventListener("keydown", (ev) => {
   if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "z") { ev.preventDefault(); ev.shiftKey ? redo() : undo(); return; }
   if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "y") { ev.preventDefault(); redo(); return; }
   if (ev.key === " ") { spaceDown = true; cv.style.cursor = "grab"; ev.preventDefault(); return; }
-  if (ev.key === "Escape") { selected = 0; renderPanel(); draw(); return; }
+  if (ev.key === "Escape") { selected = 0; selectedZone = ""; renderPanel(); draw(); return; }
   if ((ev.key === "Delete" || ev.key === "Backspace") && selected) { deleteBlock(selected); return; }
   const k = ev.key.toLowerCase();
   if (k === "r") setTool("rect");
@@ -610,15 +725,16 @@ function setTool(t) {
 }
 function setLayer(l) {
   layer = l;
+  selectedZone = "";
   $$("#layerSeg button").forEach((b) => b.classList.toggle("on", b.dataset.layer === l));
   $("#blockPalette").hidden = l !== "blocks";
   $("#zonePalette").hidden = l !== "zones";
-  updateHint(); draw();
+  updateHint(); renderPanel(); draw();
 }
 function updateHint() {
   const h = $("#hint");
   if (layer === "zones") {
-    h.innerHTML = "选择字母后在地图上涂抹，划分仓库区块（库位码第 2 段）。<br>货架属于哪个区块，由它所在的位置自动决定。<br>右键拖动平移，滚轮缩放。";
+    h.innerHTML = "选择字母后在地图上涂抹，划分仓库区块（库位码第 2 段）。<br>货架属于哪个区块，由它所在的位置自动决定。<br>用<b>选择</b>工具点一个区块，可在右侧修改它的字母、颜色，或清除。<br>右键拖动平移，滚轮缩放。";
   } else {
     h.innerHTML = "<b>矩形</b>适合画货架，<b>画笔</b>适合画不规则区域。<br>每个新笔画默认新建一个区块，按住 Shift 追加到选中区块。<br>用<b>选择</b>工具点区块，在右侧填写货架编码、层号或文字标注。<br>右键或空格+拖动平移，滚轮缩放，Delete 删除选中区块。";
   }
@@ -681,6 +797,10 @@ $("#btnExport").addEventListener("click", () => {
 function renderPanel() {
   const p = $("#propPanel");
   if (!M) { p.innerHTML = ""; return; }
+  if (layer === "zones" && selectedZone) {
+    if (zinfo[selectedZone.charCodeAt(0)]) { renderZonePanel(p); return; }
+    selectedZone = "";
+  }
   const meta = selected && M.blocks[selected];
   if (!meta) { renderSummary(p); return; }
   const bi = binfo[selected];
@@ -692,7 +812,7 @@ function renderPanel() {
     bindEdit("#pLabel", (v) => (meta.label = v));
   } else {
     const zone = bi.zone || "?";
-    const layerOpts = (v) => Array.from({ length: 10 }, (_, i) => `<option ${i === +v ? "selected" : ""}>${i}</option>`).join("");
+    const layerOpts = (v) => Array.from({ length: 31 }, (_, i) => `<option ${i === +v ? "selected" : ""}>${i}</option>`).join("");
     const problems = [];
     if (bi.zoneProblem) problems.push(bi.zoneProblem);
     if (!/^\d{2}$/.test(meta.shelf || "")) problems.push("货架编码需为两位数字");
@@ -703,8 +823,9 @@ function renderPanel() {
         <span>仓库区块</span><b>${bi.zone || '<span class="warn-text">未确定</span>'}</b>
         <span>货架编码</span><input id="pShelf" class="shelf" maxlength="2" value="${esc(meta.shelf)}" placeholder="01">
         <span>层号范围</span><div><select id="pLmin">${layerOpts(meta.layer_min)}</select> 至 <select id="pLmax">${layerOpts(meta.layer_max)}</select></div>
+        <span>每层区域数</span><div><select id="pRegions">${Array.from({ length: 30 }, (_, i) => `<option ${i + 1 === (+meta.regions || 1) ? "selected" : ""}>${i + 1}</option>`).join("")}</select> 个 <span class="muted">（每一层都分成这么多个大区域）</span></div>
       </div>
-      <div class="code-preview">${M.wh_no}-${zone}-${meta.shelf || "??"}-<span class="muted">层</span>-<span class="muted">包装</span></div>
+      <div class="code-preview">${M.wh_no}-${zone}-${meta.shelf || "??"}-<span class="muted">层</span>-<span class="muted">区域</span>/${meta.regions || 1}</div>
       ${problems.map((t) => `<div class="warn-text">⚠ ${esc(t)}</div>`).join("")}
       <div id="pStock" class="stock-list"></div>
       <button type="button" class="danger" id="pDelete">删除此货架</button>`;
@@ -717,9 +838,49 @@ function renderPanel() {
       meta.layer_min = lo; meta.layer_max = hi; lastLayers = { min: lo, max: hi };
     };
     bindEdit("#pLmin", onLayer); bindEdit("#pLmax", onLayer);
+    bindEdit("#pRegions", (v) => { meta.regions = +v; lastRegions = +v; });
     if (bi.zone && /^\d{2}$/.test(meta.shelf || "")) loadShelfStock(M.wh_no, bi.zone, meta.shelf);
   }
   $("#pDelete").addEventListener("click", () => deleteBlock(selected));
+}
+
+function renderZonePanel(p) {
+  const letter = selectedZone, code = letter.charCodeAt(0);
+  const shelves = Object.values(binfo).filter((b) => b.zone === letter).length;
+  p.innerHTML = `
+    <div class="prop-title"><i class="sw" style="background:${zoneColor(letter)}"></i><strong>仓库区块 ${letter}</strong><span class="muted">${zinfo[code].count} 格 · ${shelves} 个货架</span></div>
+    <div class="kv">
+      <span>区块字母</span><select id="pZone">${LETTERS.map((l) => `<option ${l === letter ? "selected" : ""}>${l}</option>`).join("")}</select>
+      <span>覆盖颜色</span><input type="color" id="pZoneColor" value="${zoneColor(letter)}">
+    </div>
+    <p class="note">改字母会同步改变区块内所有货架的库位码（如 ${M.wh_no}-${letter}-01 → ${M.wh_no}-新字母-01）。选已有的字母会与那个区块合并。若这些货架已有库存登记，保存时会被拒绝。</p>
+    <button type="button" class="danger" id="pZoneDelete">清除此区块字母</button>`;
+  $("#pZone").addEventListener("change", () => renameZone(letter, $("#pZone").value));
+  $("#pZoneColor").addEventListener("change", () => {
+    pushUndo();
+    M.zone_meta[letter] = { ...(M.zone_meta[letter] || {}), color: $("#pZoneColor").value };
+    setDirty(true); renderPanel(); draw();
+  });
+  $("#pZoneDelete").addEventListener("click", () => {
+    pushUndo();
+    for (let i = 0; i < Z.length; i++) if (Z[i] === code) Z[i] = 0;
+    delete M.zone_meta[letter];
+    selectedZone = "";
+    recompute(); setDirty(true); renderPanel(); draw();
+  });
+}
+
+function renameZone(from, to) {
+  if (from === to) return;
+  const fc = from.charCodeAt(0), tc = to.charCodeAt(0);
+  const merge = !!zinfo[tc];
+  if (merge && !confirm(`区块 ${to} 已存在，改名会把 ${from} 合并进 ${to}。继续吗？`)) { renderPanel(); return; }
+  pushUndo();
+  for (let i = 0; i < Z.length; i++) if (Z[i] === fc) Z[i] = tc;
+  if (!merge && M.zone_meta[from]) M.zone_meta[to] = M.zone_meta[from];
+  delete M.zone_meta[from];
+  selectedZone = to;
+  recompute(); setDirty(true); renderPanel(); draw();
 }
 
 function bindEdit(sel, apply, onBlur) {
@@ -751,8 +912,8 @@ async function loadShelfStock(wh, zone, shelf) {
     const box = $("#pStock");
     if (!box) return;
     if (!data.length) { box.innerHTML = '<p class="note">该货架暂无库存登记（或尚未保存）</p>'; return; }
-    box.innerHTML = `<h3>当前登记 ${data.length} 条</h3><table><tr><th>层</th><th>包装</th><th>SKU</th><th>余量</th></tr>${
-      data.map((r) => `<tr><td>${r.layer}</td><td>${r.pack}</td><td title="${esc(r.name)}">${esc(r.sku)}</td><td>${r.qty ?? "—"}</td></tr>`).join("")}</table>`;
+    box.innerHTML = `<h3>当前登记 ${data.length} 条</h3><table><tr><th>层</th><th>区域</th><th>SKU</th><th>品名</th><th>余量</th></tr>${
+      data.map((r) => `<tr><td>${r.layer}</td><td>${r.loc_code.split("-").pop()}</td><td>${esc(r.sku)}</td><td>${esc(r.name)}</td><td>${r.qty ?? "—"}</td></tr>`).join("")}</table>`;
   } catch { /* 忽略 */ }
 }
 

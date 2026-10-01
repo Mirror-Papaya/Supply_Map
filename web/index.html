@@ -25,7 +25,6 @@
   .tag { display: inline-block; font-size: 12px; padding: 0 6px; border-radius: 4px; margin-right: 4px; background: var(--surface-2); }
   .tag.red { background: #ffe3e3; color: #c92a2a; } .tag.amber { background: #fff3bf; color: #8f5100; }
   .maps img { max-width: 100%; border: 1px solid var(--line); border-radius: 6px; margin-top: 8px; }
-  .packs { display: grid; grid-template-columns: 40px 1fr; gap: 6px 10px; align-items: center; max-width: 420px; }
   td.mono, .mono { font-family: Consolas, monospace; }
   @media (max-width: 600px) { .topbar { flex-wrap: wrap; height: auto; padding: 8px 14px; } }
 </style>
@@ -34,7 +33,8 @@
 <header class="topbar">
   <a href="/" class="brand">库存地图</a>
   <span class="grow"></span>
-  <a class="big-link" href="/editor">打开地图编辑器</a>
+  <a class="big-link" href="/inbound">手动入库</a>
+  <a class="big-link" href="/editor" style="background:#495057">地图编辑器</a>
 </header>
 <div class="wrap">
   <section class="card">
@@ -44,11 +44,17 @@
   </section>
 
   <section class="card">
-    <h2>库位查询</h2>
+    <h2>库位查询 / 拣货定位</h2>
     <form class="row" id="searchForm">
       <input type="text" id="q" placeholder="输入 SKU，多个用空格分隔；SKU 后可跟需求数量，如：A1 3 B2">
       <button class="primary">查询</button>
     </form>
+    <div class="row" style="margin-top:10px">
+      <input type="file" id="pickFile" accept="image/*,.pdf,.xlsx,.xls,.csv">
+      <button id="btnPick" class="primary">上传拣货单，在地图上定位</button>
+      <span id="pickMsg" class="muted"></span>
+    </div>
+    <p class="note">支持拣货单的截图 / 照片、PDF、Excel、CSV。识别后在地图上用红点标出要去的货架。</p>
     <div id="searchOut"></div>
   </section>
 
@@ -63,13 +69,7 @@
   </section>
 
   <section class="card">
-    <h2>包装备注编码 <span class="note">库位码第 5 段的含义，可以之后再补</span></h2>
-    <div class="packs" id="packs"></div>
-    <div class="row" style="margin-top:10px"><button id="btnPacks">保存包装编码</button><span id="packMsg" class="muted"></span></div>
-  </section>
-
-  <section class="card">
-    <h2>最近登记 <button id="btnLogs" type="button">刷新</button></h2>
+    <h2>出入库日志 <button id="btnLogs" type="button">刷新</button> <span class="note">手动入库 = 网页操作；自动入库 = 在飞书群里给机器人发指令</span></h2>
     <div class="scroll"><table id="logs"></table></div>
   </section>
 </div>
@@ -88,26 +88,42 @@ async function loadStatus() {
   $("#svc").innerHTML = [
     ["飞书机器人", st.feishu, st.feishu_error],
     ["多维表格同步", st.bitable, st.bitable_error || (st.bitable_last_sync ? "最近同步 " + st.bitable_last_sync : "")],
-    ["图片识别（Claude）", st.vision, ""],
+    ["图片识别", st.vision, st.vision_provider || ""],
     ["每日备份", st.last_backup ? "正常" : "等待", st.last_backup ? "最近 " + st.last_backup : ""],
   ].map(([k, v, extra]) => `<div><i class="dot ${dot(v)}"></i><b>${k}</b><span>${esc(v)}</span><span class="muted">${esc(extra)}</span></div>`).join("");
+}
+
+function showResult(d, head = "") {
+  let html = head;
+  html += `<div class="maps">${Object.entries(d.hl).map(([wh, hl]) => `<img alt="仓库 ${wh} 定位图" src="/api/maps/${wh}/render.png?hl=${encodeURIComponent(hl)}">`).join("")}</div>`;
+  if (d.lines.length) {
+    html += `<table style="margin-top:10px"><tr><th>顺序</th><th>SKU</th><th>品名</th><th>需求</th><th>库位</th><th>余量</th><th>提醒</th></tr>` +
+      d.lines.map((l) => `<tr><td><b style="color:#e03131">●${l.seq}</b></td><td class="mono">${esc(l.sku)}</td><td>${esc(l.name)}</td><td>${l.need ?? ""}</td>
+      <td class="mono">${l.loc}</td><td>${l.qty ?? "—"}${l.qty_at ? `<br><span class="note">${l.qty_at.slice(5, 10)} ${esc(l.qty_by)}</span>` : ""}</td>
+      <td>${l.flags.map((f) => `<span class="tag ${f === "余量不足" ? "red" : "amber"}">${f}</span>`).join("")}</td></tr>`).join("") + "</table>";
+  }
+  if (d.unregistered.length) html += `<p><span class="tag red">未登记</span>${d.unregistered.map((u) => esc(u.sku)).join("、")}</p>`;
+  if (d.unmatched.length) html += `<p><span class="tag">未找到</span>${d.unmatched.map((u) => esc(u.input) + (u.candidates.length ? `（可能是：${u.candidates.map(esc).join("、")}）` : "")).join("、")}</p>`;
+  $("#searchOut").innerHTML = html || '<p class="muted">没有结果</p>';
 }
 
 $("#searchForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   const q = $("#q").value.trim(); if (!q) return;
-  const r = await fetch("/api/search?q=" + encodeURIComponent(q)); const d = await r.json();
-  let html = "";
-  if (d.lines.length) {
-    html += `<table><tr><th>顺序</th><th>SKU</th><th>品名</th><th>需求</th><th>库位</th><th>余量</th><th>提醒</th></tr>` +
-      d.lines.map((l) => `<tr><td>${l.seq}</td><td class="mono">${esc(l.sku)}</td><td>${esc(l.name)}</td><td>${l.need ?? ""}</td>
-      <td class="mono">${l.loc}</td><td>${l.qty ?? "—"}${l.qty_at ? `<br><span class="note">${l.qty_at.slice(5, 10)} ${esc(l.qty_by)}</span>` : ""}</td>
-      <td>${l.flags.map((f) => `<span class="tag ${f === "余量不足" ? "red" : "amber"}">${f}</span>`).join("")}</td></tr>`).join("") + "</table>";
-  }
-  if (d.unregistered.length) html += `<p><span class="tag red">未登记</span>${d.unregistered.map((u) => esc(u.sku)).join("、")}</p>`;
-  if (d.unmatched.length) html += `<p><span class="tag">未找到</span>${d.unmatched.map((u) => esc(u.input) + (u.candidates.length ? `（相近：${u.candidates.map(esc).join("、")}）` : "")).join("、")}</p>`;
-  html += `<div class="maps">${Object.entries(d.hl).map(([wh, hl]) => `<img alt="仓库 ${wh} 定位图" src="/api/maps/${wh}/render.png?hl=${encodeURIComponent(hl)}">`).join("")}</div>`;
-  $("#searchOut").innerHTML = html || '<p class="muted">没有结果</p>';
+  const r = await fetch("/api/search?q=" + encodeURIComponent(q));
+  showResult(await r.json());
+});
+
+$("#btnPick").addEventListener("click", async () => {
+  const f = $("#pickFile").files[0]; if (!f) { toast("请先选择拣货单文件", true); return; }
+  const fd = new FormData(); fd.append("file", f);
+  $("#btnPick").disabled = true; $("#pickMsg").textContent = "识别中，请稍等（每页约 5 秒）…";
+  try {
+    const r = await fetch("/api/pick", { method: "POST", body: fd }); const d = await r.json();
+    if (!r.ok) { toast(d.detail || "识别失败", true); $("#searchOut").innerHTML = ""; return; }
+    showResult(d, `<p class="note">${esc(d.source)}：共 ${d.rows} 行。地图上的红点就是要去的货架，数字是拣货顺序。</p>`);
+  } catch (err) { toast("上传失败：" + err, true); }
+  finally { $("#btnPick").disabled = false; $("#pickMsg").textContent = ""; }
 });
 
 $("#btnImport").addEventListener("click", async () => {
@@ -120,24 +136,15 @@ $("#btnImport").addEventListener("click", async () => {
   loadStatus();
 });
 
-async function loadPacks() {
-  const d = await (await fetch("/api/pack_codes")).json(); const m = Object.fromEntries(d.map((x) => [x.code, x.meaning]));
-  $("#packs").innerHTML = Array.from({ length: 10 }, (_, i) => `<b class="mono">${i}</b><input data-code="${i}" value="${esc(m[i] || "")}" placeholder="未定义">`).join("");
-}
-$("#btnPacks").addEventListener("click", async () => {
-  const items = [...document.querySelectorAll("#packs input")].map((el) => ({ code: el.dataset.code, meaning: el.value }));
-  await fetch("/api/pack_codes", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(items) });
-  toast("已保存");
-});
-
+const methodName = (m) => ({ "聊天": "自动入库", "网页": "手动入库" }[m] || m);   // 旧版日志里的叫法
 async function loadLogs() {
   const d = await (await fetch("/api/logs?limit=100")).json();
-  $("#logs").innerHTML = `<tr><th>时间</th><th>操作</th><th>SKU</th><th>库位</th><th>余量</th><th>方式</th><th>登记人</th></tr>` +
-    (d.length ? d.map((g) => `<tr><td>${g.created_at}</td><td>${g.action}</td><td class="mono">${esc(g.sku)}</td><td class="mono">${g.loc_code}</td>
-      <td>${g.qty ?? ""}</td><td>${g.method}</td><td>${esc(g.user_name || g.user_id)}</td></tr>`).join("") : `<tr><td colspan="7" class="muted">暂无登记</td></tr>`);
+  $("#logs").innerHTML = `<tr><th>登记时间</th><th>操作</th><th>SKU</th><th>库位</th><th>余量</th><th>方式</th><th>登记人</th></tr>` +
+    (d.length ? d.map((g) => `<tr><td>${g.created_at}</td><td>${g.action === "登记" ? "入库" : g.action}</td><td class="mono">${esc(g.sku)}</td><td class="mono">${g.loc_code}</td>
+      <td>${g.qty ?? ""}</td><td>${methodName(g.method)}</td><td>${esc(g.user_name || g.user_id)}</td></tr>`).join("") : `<tr><td colspan="7" class="muted">暂无登记</td></tr>`);
 }
 $("#btnLogs").addEventListener("click", loadLogs);
-loadStatus(); loadPacks(); loadLogs();
+loadStatus(); loadLogs();
 setInterval(loadStatus, 15000);
 </script>
 </body>
