@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>库存地图</title>
+<link rel="stylesheet" href="/static/common.css">
+<style>
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 20px 16px 60px; display: flex; flex-direction: column; gap: 16px; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
+  .card h2 { font-size: 15px; margin-bottom: 12px; display: flex; align-items: center; gap: 10px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+  .stat { background: var(--surface-2); border-radius: 8px; padding: 10px 12px; }
+  .stat b { display: block; font-size: 22px; }
+  .stat span { font-size: 12px; color: var(--muted); }
+  .svc { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 8px; margin-top: 12px; font-size: 13px; }
+  .svc div { display: flex; gap: 8px; align-items: baseline; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #adb5bd; display: inline-block; flex: none; }
+  .dot.ok { background: var(--ok); } .dot.bad { background: var(--danger); } .dot.mid { background: var(--warn); }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .row input[type=text] { flex: 1; min-width: 200px; }
+  .big-link { display: inline-flex; align-items: center; gap: 8px; background: var(--accent); color: #fff; text-decoration: none;
+    padding: 8px 16px; border-radius: 6px; font-weight: 600; }
+  .scroll { max-height: 420px; overflow: auto; }
+  .tag { display: inline-block; font-size: 12px; padding: 0 6px; border-radius: 4px; margin-right: 4px; background: var(--surface-2); }
+  .tag.red { background: #ffe3e3; color: #c92a2a; } .tag.amber { background: #fff3bf; color: #8f5100; }
+  .maps img { max-width: 100%; border: 1px solid var(--line); border-radius: 6px; margin-top: 8px; }
+  .packs { display: grid; grid-template-columns: 40px 1fr; gap: 6px 10px; align-items: center; max-width: 420px; }
+  td.mono, .mono { font-family: Consolas, monospace; }
+  @media (max-width: 600px) { .topbar { flex-wrap: wrap; height: auto; padding: 8px 14px; } }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a href="/" class="brand">库存地图</a>
+  <span class="grow"></span>
+  <a class="big-link" href="/editor">打开地图编辑器</a>
+</header>
+<div class="wrap">
+  <section class="card">
+    <h2>概况</h2>
+    <div class="stats" id="stats"></div>
+    <div class="svc" id="svc"></div>
+  </section>
+
+  <section class="card">
+    <h2>库位查询</h2>
+    <form class="row" id="searchForm">
+      <input type="text" id="q" placeholder="输入 SKU，多个用空格分隔；SKU 后可跟需求数量，如：A1 3 B2">
+      <button class="primary">查询</button>
+    </form>
+    <div id="searchOut"></div>
+  </section>
+
+  <section class="card">
+    <h2>商品字典（SKU）<span class="badge" id="skuCount"></span></h2>
+    <p class="note">导入 Excel / CSV：表头需包含 SKU（或 编码 / 货号）列，可选 品名、别名（旧码，多个用逗号分隔）列。已存在的 SKU 会更新品名、合并别名。</p>
+    <div class="row" style="margin-top:10px">
+      <input type="file" id="skuFile" accept=".xlsx,.xls,.csv">
+      <button id="btnImport" class="primary">导入</button>
+      <span id="importMsg" class="muted"></span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>包装备注编码 <span class="note">库位码第 5 段的含义，可以之后再补</span></h2>
+    <div class="packs" id="packs"></div>
+    <div class="row" style="margin-top:10px"><button id="btnPacks">保存包装编码</button><span id="packMsg" class="muted"></span></div>
+  </section>
+
+  <section class="card">
+    <h2>最近登记 <button id="btnLogs" type="button">刷新</button></h2>
+    <div class="scroll"><table id="logs"></table></div>
+  </section>
+</div>
+<div id="toast" class="toast" hidden></div>
+<script>
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+function toast(msg, err) { const t = $("#toast"); t.textContent = msg; t.className = "toast" + (err ? " err" : ""); t.hidden = false; setTimeout(() => t.hidden = true, 3000); }
+
+async function loadStatus() {
+  const r = await fetch("/api/status"); const d = await r.json(); const s = d.stats, st = d.status;
+  $("#stats").innerHTML = [["仓库", s.warehouses], ["货架", s.shelves], ["字典 SKU", s.skus], ["已登记 SKU", s.stock_skus], ["库位记录", s.stock_rows], ["登记日志", s.logs]]
+    .map(([k, v]) => `<div class="stat"><b>${v}</b><span>${k}</span></div>`).join("");
+  $("#skuCount").textContent = s.skus;
+  const dot = (v) => v === "已连接" || v === "已配置" || v === "正常" ? "ok" : v === "未配置" ? "" : v === "连接中" ? "mid" : "bad";
+  $("#svc").innerHTML = [
+    ["飞书机器人", st.feishu, st.feishu_error],
+    ["多维表格同步", st.bitable, st.bitable_error || (st.bitable_last_sync ? "最近同步 " + st.bitable_last_sync : "")],
+    ["图片识别（Claude）", st.vision, ""],
+    ["每日备份", st.last_backup ? "正常" : "等待", st.last_backup ? "最近 " + st.last_backup : ""],
+  ].map(([k, v, extra]) => `<div><i class="dot ${dot(v)}"></i><b>${k}</b><span>${esc(v)}</span><span class="muted">${esc(extra)}</span></div>`).join("");
+}
+
+$("#searchForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const q = $("#q").value.trim(); if (!q) return;
+  const r = await fetch("/api/search?q=" + encodeURIComponent(q)); const d = await r.json();
+  let html = "";
+  if (d.lines.length) {
+    html += `<table><tr><th>顺序</th><th>SKU</th><th>品名</th><th>需求</th><th>库位</th><th>余量</th><th>提醒</th></tr>` +
+      d.lines.map((l) => `<tr><td>${l.seq}</td><td class="mono">${esc(l.sku)}</td><td>${esc(l.name)}</td><td>${l.need ?? ""}</td>
+      <td class="mono">${l.loc}</td><td>${l.qty ?? "—"}${l.qty_at ? `<br><span class="note">${l.qty_at.slice(5, 10)} ${esc(l.qty_by)}</span>` : ""}</td>
+      <td>${l.flags.map((f) => `<span class="tag ${f === "余量不足" ? "red" : "amber"}">${f}</span>`).join("")}</td></tr>`).join("") + "</table>";
+  }
+  if (d.unregistered.length) html += `<p><span class="tag red">未登记</span>${d.unregistered.map((u) => esc(u.sku)).join("、")}</p>`;
+  if (d.unmatched.length) html += `<p><span class="tag">未找到</span>${d.unmatched.map((u) => esc(u.input) + (u.candidates.length ? `（相近：${u.candidates.map(esc).join("、")}）` : "")).join("、")}</p>`;
+  html += `<div class="maps">${Object.entries(d.hl).map(([wh, hl]) => `<img alt="仓库 ${wh} 定位图" src="/api/maps/${wh}/render.png?hl=${encodeURIComponent(hl)}">`).join("")}</div>`;
+  $("#searchOut").innerHTML = html || '<p class="muted">没有结果</p>';
+});
+
+$("#btnImport").addEventListener("click", async () => {
+  const f = $("#skuFile").files[0]; if (!f) { toast("请选择文件", true); return; }
+  const fd = new FormData(); fd.append("file", f);
+  $("#importMsg").textContent = "导入中…";
+  const r = await fetch("/api/skus/import", { method: "POST", body: fd }); const d = await r.json();
+  if (!r.ok) { $("#importMsg").textContent = ""; toast(d.detail || "导入失败", true); return; }
+  $("#importMsg").textContent = `导入 ${d.imported} 条（识别列：${Object.entries(d.columns).map(([k, v]) => k + "=" + v).join("，")}），字典共 ${d.total} 个 SKU`;
+  loadStatus();
+});
+
+async function loadPacks() {
+  const d = await (await fetch("/api/pack_codes")).json(); const m = Object.fromEntries(d.map((x) => [x.code, x.meaning]));
+  $("#packs").innerHTML = Array.from({ length: 10 }, (_, i) => `<b class="mono">${i}</b><input data-code="${i}" value="${esc(m[i] || "")}" placeholder="未定义">`).join("");
+}
+$("#btnPacks").addEventListener("click", async () => {
+  const items = [...document.querySelectorAll("#packs input")].map((el) => ({ code: el.dataset.code, meaning: el.value }));
+  await fetch("/api/pack_codes", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(items) });
+  toast("已保存");
+});
+
+async function loadLogs() {
+  const d = await (await fetch("/api/logs?limit=100")).json();
+  $("#logs").innerHTML = `<tr><th>时间</th><th>操作</th><th>SKU</th><th>库位</th><th>余量</th><th>方式</th><th>登记人</th></tr>` +
+    (d.length ? d.map((g) => `<tr><td>${g.created_at}</td><td>${g.action}</td><td class="mono">${esc(g.sku)}</td><td class="mono">${g.loc_code}</td>
+      <td>${g.qty ?? ""}</td><td>${g.method}</td><td>${esc(g.user_name || g.user_id)}</td></tr>`).join("") : `<tr><td colspan="7" class="muted">暂无登记</td></tr>`);
+}
+$("#btnLogs").addEventListener("click", loadLogs);
+loadStatus(); loadPacks(); loadLogs();
+setInterval(loadStatus, 15000);
+</script>
+</body>
+</html>

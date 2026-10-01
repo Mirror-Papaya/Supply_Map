@@ -1,0 +1,15 @@
+# 密钥与本地配置
+.env
+.claude/settings.local.json
+
+# 运行数据（数据库、备份、日志、底图）
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/

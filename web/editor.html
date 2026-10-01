@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>库存地图编辑器</title>
+<link rel="stylesheet" href="/static/common.css">
+<link rel="stylesheet" href="/static/editor.css">
+</head>
+<body class="editor">
+<header class="topbar">
+  <a href="/" class="brand">库存地图</a>
+  <label class="field-inline">仓库
+    <select id="whSelect"></select>
+  </label>
+  <button id="btnNewWh" type="button">新建仓库</button>
+  <label class="field-inline">名称 <input id="whName" size="10" placeholder="仓库名称"></label>
+  <button id="btnCanvas" type="button">画布设置</button>
+  <span class="grow"></span>
+  <span id="dirtyMark" class="dirty" hidden>● 未保存</span>
+  <button id="btnUndo" type="button" title="撤销 Ctrl+Z">撤销</button>
+  <button id="btnRedo" type="button" title="重做 Ctrl+Y">重做</button>
+  <button id="btnCheck" type="button">检查</button>
+  <button id="btnExport" type="button" title="用机器人同款渲染导出（需先保存）">导出图片</button>
+  <button id="btnSave" type="button" class="primary" title="保存 Ctrl+S">保存</button>
+</header>
+
+<div class="workspace">
+  <aside class="panel tools">
+    <section>
+      <h3>编辑图层</h3>
+      <div class="seg" id="layerSeg">
+        <button type="button" data-layer="blocks" class="on">地图区块</button>
+        <button type="button" data-layer="zones">仓库区块</button>
+      </div>
+    </section>
+
+    <section id="blockPalette">
+      <h3>区块类型</h3>
+      <div class="palette">
+        <label><input type="radio" name="btype" value="2" checked><i class="sw t2"></i>库存（货架）<kbd>1</kbd></label>
+        <label><input type="radio" name="btype" value="1"><i class="sw t1"></i>功能区块<kbd>2</kbd></label>
+        <label><input type="radio" name="btype" value="3"><i class="sw t3"></i>走廊<kbd>3</kbd></label>
+        <label><input type="radio" name="btype" value="0"><i class="sw t0"></i>未定义 / 橡皮<kbd>4</kbd></label>
+      </div>
+      <h3>新笔画</h3>
+      <div class="palette">
+        <label><input type="radio" name="strokeMode" value="new" checked>新建区块</label>
+        <label><input type="radio" name="strokeMode" value="append">追加到选中区块</label>
+      </div>
+      <p class="note">按住 Shift 临时切换</p>
+    </section>
+
+    <section id="zonePalette" hidden>
+      <h3>区块字母</h3>
+      <div class="zone-row">
+        <select id="zoneLetter"></select>
+        <input type="color" id="zoneColor" title="覆盖颜色">
+      </div>
+      <label class="check"><input type="checkbox" id="zoneErase"> 橡皮（清除字母）</label>
+    </section>
+
+    <section>
+      <h3>工具</h3>
+      <div class="seg" id="toolSeg">
+        <button type="button" data-tool="rect" class="on" title="R">矩形</button>
+        <button type="button" data-tool="brush" title="B">画笔</button>
+        <button type="button" data-tool="select" title="V">选择</button>
+      </div>
+    </section>
+
+    <section>
+      <h3>显示</h3>
+      <label class="check"><input type="checkbox" id="showZones" checked> 仓库区块覆盖</label>
+      <label class="check"><input type="checkbox" id="showGrid" checked> 网格线</label>
+      <label class="check"><input type="checkbox" id="showBg" checked> 底图</label>
+      <label class="slider">底图透明度 <input type="range" id="bgOpacity" min="0.1" max="1" step="0.05"></label>
+      <button type="button" id="btnBg">导入底图…</button>
+      <input type="file" id="bgFile" accept="image/*" hidden>
+      <button type="button" id="btnFit">适应窗口</button>
+    </section>
+
+    <section class="hint" id="hint"></section>
+  </aside>
+
+  <main class="stage" id="stage">
+    <canvas id="cv"></canvas>
+    <div class="coord" id="coord"></div>
+    <div class="empty" id="emptyState" hidden>
+      <p>还没有仓库地图</p>
+      <button type="button" class="primary" id="btnNewWh2">新建第一个仓库</button>
+    </div>
+  </main>
+
+  <aside class="panel props">
+    <section id="propPanel"></section>
+    <section>
+      <h3>检查结果 <span id="issueCount" class="badge"></span></h3>
+      <ul id="issues" class="issues"><li class="muted">点"检查"或"保存"后显示</li></ul>
+    </section>
+  </aside>
+</div>
+
+<dialog id="dlgNewWh">
+  <form method="dialog" class="form">
+    <h2>新建仓库</h2>
+    <label>仓库号（两位数字）<input name="wh_no" required pattern="\d{2}" placeholder="01"></label>
+    <label>仓库名称<input name="name" placeholder="一号仓"></label>
+    <div class="row3">
+      <label>图片宽(px)<input name="width" type="number" value="1600" min="40"></label>
+      <label>图片高(px)<input name="height" type="number" value="1000" min="40"></label>
+      <label>格子(px)<input name="cell" type="number" value="20" min="4" max="200"></label>
+    </div>
+    <p class="note" data-grid-note></p>
+    <p class="error" data-error></p>
+    <div class="actions">
+      <button value="cancel" formnovalidate>取消</button>
+      <button value="ok" class="primary">创建</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlgCanvas">
+  <form method="dialog" class="form">
+    <h2>画布设置</h2>
+    <div class="row3">
+      <label>图片宽(px)<input name="width" type="number" min="40"></label>
+      <label>图片高(px)<input name="height" type="number" min="40"></label>
+      <label>格子(px)<input name="cell" type="number" min="4" max="200"></label>
+    </div>
+    <p class="note" data-grid-note></p>
+    <p class="note">修改尺寸时按像素位置保留已画内容（左上角对齐）；缩小或加粗格子可能丢失部分格子，可撤销。</p>
+    <div class="actions">
+      <button value="delete" class="danger" formnovalidate>删除此仓库</button>
+      <span class="grow"></span>
+      <button value="cancel" formnovalidate>取消</button>
+      <button value="ok" class="primary">应用</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toast" class="toast" hidden></div>
+<script src="/static/editor.js"></script>
+</body>
+</html>
